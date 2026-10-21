@@ -267,21 +267,20 @@ html[data-boot="minimal"] .pkb-row{justify-content:center}
       </div>
     </div>
     <aside class="card">
-      <div class="card-mini" style="margin-bottom:12px;display:flex;flex-direction:column;gap:7px" aria-label="Clip timeline">
+      <div class="card-mini" style="margin-bottom:12px;display:flex;flex-direction:column;gap:8px" aria-label="Clip timeline">
         <div class="row between" style="gap:8px;align-items:center;flex-wrap:wrap">
           <b>ตำแหน่งคลิป</b><span id="clipFlowTime" class="small" aria-live="polite">00:00 / --:--</span>
           <span id="clipFlowRemaining" class="small">เหลือ --:--</span>
         </div>
         <input id="clipFlowSeek" type="range" min="0" max="0" step="0.1" value="0" disabled aria-label="เลื่อนตำแหน่งคลิปปัจจุบัน">
+        <div class="row" style="gap:8px;margin:0;flex-wrap:wrap">
+          <button class="btn primary" id="sceneClipPlay" type="button">▶ เล่นคลิป / Start Engine</button>
+          <button class="btn ghost" id="sceneClipStop" type="button">■ หยุดคลิป / Stop Engine</button>
+        </div>
         <div id="clipFlowFps" class="muted small">Source — FPS · Output — FPS</div>
         <div id="sceneClipStatus" class="muted small" role="status" aria-live="polite"></div>
       </div>
       <h2>Inspector</h2>
-      <div class="unavail scene-offload">
-        <b>Scene Builder = Composition Only</b>
-        <p>Video Filter / Beauty / Face ถูกย้ายไปที่ Video to Filter เพื่อไม่ให้ Live Engine ต้องประมวลผลหนักตลอดเวลา</p>
-        <a class="btn primary" href="#video-to-filter">เปิด Video to Filter</a>
-      </div>
       <div class="row" style="margin:0 0 10px"><button class="btn primary" id="addText">+ เพิ่มข้อความ</button></div>
       <div id="textLayers" class="text-layers"></div>
       <div class="field"><label>Text</label><textarea id="inText" rows="3" maxlength="4000" placeholder="พิมพ์ข้อความ…"></textarea><div class="field-meta"><span>รองรับหลายบรรทัด</span><span id="textCount">0 / 4000</span></div></div>
@@ -504,7 +503,13 @@ html[data-boot="minimal"] .pkb-row{justify-content:center}
 <section id="v-console" class="view" hidden>
   <div class="console">
     <div class="card prog">
-      <div class="row between"><h2>Program</h2><span class="tag" id="cTag">STOPPED</span></div>
+      <div class="row between" style="gap:8px;align-items:center;flex-wrap:wrap">
+        <h2 style="margin:0">Program</h2>
+        <div class="row" style="gap:8px;margin:0">
+          <span class="tag" id="cTag">STOPPED</span>
+          <button class="btn ghost" id="consoleSettingsToggle" type="button" aria-expanded="false" aria-controls="consoleSettingsPanel">⚙ ตั้งค่า</button>
+        </div>
+      </div>
       <div class="progbox"><img data-stream="/preview.mjpg" alt="Program output"></div>
       <div id="consoleClipTimeline" class="card-mini" style="margin-top:10px;display:flex;flex-direction:column;gap:7px" hidden aria-label="Current clip progress">
         <div class="row between" style="gap:8px;align-items:center;flex-wrap:wrap">
@@ -513,6 +518,44 @@ html[data-boot="minimal"] .pkb-row{justify-content:center}
         </div>
         <div style="height:7px;background:var(--line,rgba(255,255,255,.12));border-radius:999px;overflow:hidden"><div id="consoleClipBar" style="height:100%;width:0%;background:var(--accent,#7c6cff);border-radius:999px;transition:width .15s linear"></div></div>
         <div class="row between" style="gap:8px;flex-wrap:wrap"><span id="consoleClipMeta" class="muted small">Waiting for clip…</span><span id="consolePerf" class="muted small">Render — · Console — · Camera — FPS</span></div>
+      </div>
+      <div id="consoleSettingsPanel" class="card-mini" style="margin-top:12px" hidden>
+        <div class="row between" style="gap:8px;align-items:center;flex-wrap:wrap">
+          <div><b>ตั้งค่าก่อนเริ่ม Engine</b><p class="muted small" style="margin:4px 0 0">ค่าด้านล่างจะถูกใช้ตอนกด Start Engine เท่านั้น ไม่เปลี่ยนกลางคลิป/กลาง LIVE</p></div>
+        </div>
+        <div class="field">
+          <label for="consoleClipMode">โหมดการเล่นคลิป</label>
+          <select id="consoleClipMode">
+            <option value="source">เอาต์พุต &amp; ซอร์ส — เล่น Source ปัจจุบัน</option>
+            <option value="playlist">เพลย์ลิสต์คลิป — Open → Normal → Stop</option>
+          </select>
+          <p class="muted small" style="margin:4px 0 0">โหมด Playlist ต้องตั้งคลิป Open และ Normal ไว้ใน Settings → Clip Flow ก่อน</p>
+        </div>
+        <div class="two">
+          <div class="field">
+            <label for="consoleOutputRes">อัตราส่วน / ความละเอียด Output</label>
+            <select id="consoleOutputRes">
+              <option value="720x1280">แนวตั้ง 9:16 · 720×1280</option>
+              <option value="1080x1920">แนวตั้ง 9:16 · 1080×1920</option>
+              <option value="1280x720">แนวนอน 16:9 · 1280×720</option>
+              <option value="1920x1080">แนวนอน 16:9 · 1920×1080</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="consoleOutputFps">Output FPS</label>
+            <select id="consoleOutputFps">
+              <option value="24">24 FPS</option>
+              <option value="30">30 FPS</option>
+              <option value="60">60 FPS</option>
+              <option value="source">Source FPS (Auto)</option>
+            </select>
+          </div>
+        </div>
+        <div class="row" style="gap:8px;margin:8px 0 0;flex-wrap:wrap">
+          <button class="btn primary" id="consoleSettingsSave" type="button">บันทึกการตั้งค่า</button>
+          <button class="btn ghost" id="consoleSettingsClose" type="button">ปิด</button>
+        </div>
+        <div id="consoleSettingsStatus" class="muted small" style="margin-top:8px" role="status" aria-live="polite">การตั้งค่าจะถูกนำไปใช้เมื่อกด Start Engine ครั้งถัดไป</div>
       </div>
     </div>
     <div class="side-col">
@@ -873,9 +916,9 @@ html[data-boot="minimal"] .pkb-row{justify-content:center}
     <div class="card wide-card">
       <div class="row between" style="align-items:center;gap:12px;flex-wrap:wrap">
         <h2 style="margin:0">Open · Normal · Stop</h2>
-        <label class="check"><input id="clipFlowEnabled" type="checkbox" checked> Auto-play Clip Flow when Start is pressed</label>
+        <span class="tag">Playlist</span>
       </div>
-      <p class="muted small">ตั้งค่าไฟล์คลิปที่ส่งออกทาง Virtual Camera: กดเริ่ม Flow แล้วจะเปิด Virtual Camera ให้อัตโนมัติ เล่น Open หนึ่งครั้ง จากนั้นสุ่ม Normal ทีละคลิปโดยไม่ซ้ำจนหมดรอบ แล้วสุ่มรอบใหม่ ส่วน Stop จะเล่นจบก่อนสั่งหยุด LIVE</p>
+      <p class="muted small">ตั้งคลิปสำหรับโหมด Playlist ที่นี่ แล้วเลือกโหมดเล่นจาก Live Console → ⚙ ตั้งค่า ก่อนกด Start Engine: Open เล่นหนึ่งครั้ง, Normal สุ่มไม่ซ้ำในแต่ละรอบ และ Stop เล่นจนจบก่อนจบ LIVE</p>
 
       <div class="card-mini" style="margin-top:12px">
         <div class="row between" style="align-items:center;gap:10px;flex-wrap:wrap">

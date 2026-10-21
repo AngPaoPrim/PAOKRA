@@ -2075,16 +2075,74 @@ async function stopEnginePlayback(){
     notify("หยุด Engine + Virtual Audio แล้ว");
   }catch(e){notify("หยุด Engine ไม่สำเร็จ: "+e.message,false)}finally{engineActionBusy=false;await Promise.all([poll(),loadClipFlow(true)])}
 }
-$("#bStart")?.addEventListener("click",async()=>{
+const CONSOLE_START_KEY="paokra.console.start.v1";
+const CONSOLE_OUTPUT_PRESETS=["720x1280","1080x1920","1280x720","1920x1080"];
+function readConsoleStartSettings(){
+  const currentRes=String((S?.width||720)+"x"+(S?.height||1280));
+  const currentFps=String(S?.fps_mode==="source"?"source":(S?.fps||30));
+  let saved={};try{saved=JSON.parse(localStorage.getItem(CONSOLE_START_KEY)||"{}")||{}}catch{}
+  const defaultMode=(clipFlowConfig.enabled&&clipFlowConfig.open&&(clipFlowConfig.normal||[]).length)?"playlist":"source";
+  const mode=["source","playlist"].includes(saved.mode)?saved.mode:defaultMode;
+  const resolution=CONSOLE_OUTPUT_PRESETS.includes(saved.resolution)?saved.resolution:(CONSOLE_OUTPUT_PRESETS.includes(currentRes)?currentRes:"720x1280");
+  const fps=["24","30","60","source"].includes(String(saved.fps))?String(saved.fps):(["24","30","60","source"].includes(currentFps)?currentFps:"30");
+  return {mode,resolution,fps};
+}
+function hydrateConsoleStartSettings(){
+  const p=readConsoleStartSettings();
+  const mode=$("#consoleClipMode"),resolution=$("#consoleOutputRes"),fps=$("#consoleOutputFps");
+  if(mode)mode.value=p.mode;if(resolution)resolution.value=p.resolution;if(fps)fps.value=p.fps;
+  const status=$("#consoleSettingsStatus");if(status)status.textContent="ค่าที่บันทึก: "+(p.mode==="playlist"?"เพลย์ลิสต์คลิป":"เอาต์พุต & ซอร์ส")+" · "+p.resolution.replace("x","×")+" · "+(p.fps==="source"?"Source FPS (Auto)":p.fps+" FPS")+" · ใช้เมื่อกด Start Engine";
+}
+function saveConsoleStartSettings(){
+  const mode=String($("#consoleClipMode")?.value||"source");
+  const resolution=String($("#consoleOutputRes")?.value||"720x1280");
+  const fps=String($("#consoleOutputFps")?.value||"30");
+  if(!["source","playlist"].includes(mode)||!CONSOLE_OUTPUT_PRESETS.includes(resolution)||!["24","30","60","source"].includes(fps))throw new Error("ค่าตั้งค่าโหมด/ความละเอียด/FPS ไม่ถูกต้อง");
+  localStorage.setItem(CONSOLE_START_KEY,JSON.stringify({mode,resolution,fps}));
+  hydrateConsoleStartSettings();notify("บันทึกค่าตั้งค่า Live Console แล้ว · จะใช้ตอนกด Start Engine");
+}
+$("#consoleSettingsToggle")?.addEventListener("click",async()=>{
+  const panel=$("#consoleSettingsPanel"),button=$("#consoleSettingsToggle");if(!panel||!button)return;
+  if(panel.hidden){await loadClipFlow(true,false);hydrateConsoleStartSettings();panel.hidden=false;button.setAttribute("aria-expanded","true")}
+  else{panel.hidden=true;button.setAttribute("aria-expanded","false")}
+});
+$("#consoleSettingsClose")?.addEventListener("click",()=>{const panel=$("#consoleSettingsPanel");if(panel)panel.hidden=true;$("#consoleSettingsToggle")?.setAttribute("aria-expanded","false")});
+$("#consoleSettingsSave")?.addEventListener("click",()=>{try{saveConsoleStartSettings()}catch(e){notify(e.message,false)}});
+async function startEnginePlayback(){
   if(engineActionBusy)return;
   engineActionBusy=true;render();
   try{
-    await post("/api/control",{action:"start"});
-    await Promise.all([poll(),loadClipFlow(true)]);
+    if(!S)await poll();
+    let prefs=readConsoleStartSettings();
+    if(!S?.running){
+      await loadClipFlow(true,false);
+      prefs=readConsoleStartSettings();
+      if(prefs.mode==="playlist"&&(!clipFlowConfig.open||!(clipFlowConfig.normal||[]).length))throw new Error("โหมด Playlist ต้องตั้งคลิป Open และ Normal ก่อนที่ Settings → Clip Flow");
+      const [width,height]=prefs.resolution.split("x").map(Number);
+      const outputPatch={width,height,fps_mode:prefs.fps==="source"?"source":"fixed"};
+      if(prefs.fps!=="source")outputPatch.fps=Number(prefs.fps);
+      const changed=Number(S?.width)!==width||Number(S?.height)!==height||
+        String(S?.fps_mode||"fixed")!==outputPatch.fps_mode||
+        (prefs.fps!=="source"&&Number(S?.fps)!==Number(prefs.fps));
+      const cameraWasActive=!!S?.virtualcam;
+      let cameraStopped=false;
+      try{
+        if(cameraWasActive&&changed){await post("/api/virtualcam",{action:"reconfigure-stop"});cameraStopped=true}
+        if(changed)await post("/api/settings",outputPatch);
+        if(cameraStopped){const restarted=await post("/api/virtualcam",{action:"start"});if(!restarted?.active)throw new Error(restarted?.error||"Virtual Camera เริ่มใหม่หลังเปลี่ยน Output ไม่สำเร็จ")}
+      }catch(e){if(cameraStopped){try{await post("/api/virtualcam",{action:"start"})}catch{}}throw e}
+      await poll();
+    }
+    await post("/api/control",{action:"start",...(!S?.running?{playback_mode:prefs.mode}:{})});
+    await Promise.all([poll(),loadClipFlow(true,false)]);
     const pv=$("#stageBgVideo");if(pv&&S?.source_enabled)pv.play().catch(()=>{});
-    notify("เริ่ม Engine + Virtual Audio แล้ว");
-  }catch(e){notify("เริ่ม Engine ไม่สำเร็จ: "+e.message,false)}finally{engineActionBusy=false;await Promise.all([poll(),loadClipFlow(true)])}
-});
+    notify(prefs.mode==="playlist"?"เริ่ม Playlist: Open → Normal แล้ว":"เริ่ม Engine สำหรับ Source ปัจจุบันแล้ว");
+  }catch(e){notify("เริ่ม Engine ไม่สำเร็จ: "+e.message,false)}
+  finally{engineActionBusy=false;await Promise.all([poll(),loadClipFlow(true,false)]);renderClipFlow()}
+}
+$("#bStart")?.addEventListener("click",startEnginePlayback);
+$("#sceneClipPlay")?.addEventListener("click",startEnginePlayback);
+$("#sceneClipStop")?.addEventListener("click",stopEnginePlayback);
 $("#bStop")?.addEventListener("click",stopEnginePlayback);
 $("#sceneStop")?.addEventListener("click",stopEnginePlayback);
 
@@ -2304,10 +2362,42 @@ function clipFlowTimelineInput(){
   const value=Number(seek.value)||0,duration=Number(seek.max)||0;
   time.textContent=clipFlowClock(value)+" / "+(duration>0?clipFlowClock(duration):"--:--");
 }
+function clipFlowTimelineDuration(){
+  const sourceDuration=Math.max(0,Number(S?.source_duration_seconds)||0);
+  if(!clipFlowRuntime.active)return sourceDuration;
+  const flowDuration=Math.max(0,Number(clipFlowRuntime.duration_seconds)||0);
+  if(flowDuration>0)return flowDuration;
+  const runtimePath=clipFlowPathKey(clipFlowRuntime.current_clip||"");
+  const sourcePath=clipFlowPathKey(S?.source||"");
+  return runtimePath&&runtimePath===sourcePath?sourceDuration:0;
+}
+function clipFlowUpdateClockAnchor(runtime){
+  const now=performance.now(),current=runtime||{};
+  const identity=[current.active?1:0,current.phase||"idle",clipFlowPathKey(current.current_clip||""),Number(current.changed_at)||0].join("|");
+  const position=Math.max(0,Number(current.position_seconds)||0);
+  if(identity!==clipFlowUiIdentity){
+    clipFlowUiIdentity=identity;clipFlowUiPosition=position;clipFlowUiAt=now;return;
+  }
+  const projected=clipFlowUiPosition+Math.max(0,now-clipFlowUiAt)/1000;
+  // Polling may correct the local clock forward, but a delayed/stale response
+  // must not rewind it or preserve a previous clip's position after a handoff.
+  if(position>=projected-0.35){
+    clipFlowUiPosition=position;clipFlowUiAt=now;
+  }
+}
 function clipFlowDisplayPosition(){
-  if(!clipFlowRuntime.active){const duration=Math.max(0,Number(S?.source_duration_seconds)||0);if(!S?.running||duration<=0)return 0;let position=Math.max(0,Number(S.source_position_seconds)||0)+Math.max(0,performance.now()-stateSnapshotAt)/1000;return S.loop?position%duration:Math.min(duration,position)}const duration=Math.max(0,Number(clipFlowRuntime.duration_seconds)||0),base=Math.max(0,Number(clipFlowRuntime.position_seconds)||0);
-  if(duration<=0)return 0;
-  return Math.min(duration,Math.max(base,clipFlowUiPosition+Math.max(0,performance.now()-clipFlowUiAt)/1000));
+  const now=performance.now(),duration=clipFlowTimelineDuration();
+  if(!S?.running||duration<=0)return 0;
+  if(!clipFlowRuntime.active){
+    let position=Math.max(0,Number(S.source_position_seconds)||0)+Math.max(0,now-stateSnapshotAt)/1000;
+    return S.loop?position%duration:Math.min(duration,position);
+  }
+  const runtimeDuration=Math.max(0,Number(clipFlowRuntime.duration_seconds)||0);
+  const sourceMatches=clipFlowPathKey(S?.source||"")===clipFlowPathKey(clipFlowRuntime.current_clip||"");
+  const base=runtimeDuration>0?Math.max(0,Number(clipFlowRuntime.position_seconds)||0)
+    :(sourceMatches?Math.max(0,Number(S?.source_position_seconds)||0)+Math.max(0,now-stateSnapshotAt)/1000:Math.max(0,Number(clipFlowRuntime.position_seconds)||0));
+  const local=clipFlowUiPosition+Math.max(0,now-clipFlowUiAt)/1000;
+  return Math.min(duration,Math.max(base,local));
 }
 function renderClipFlow(){
   const en=$("#clipFlowEnabled");if(en&&document.activeElement!==en)en.checked=!!clipFlowConfig.enabled;
@@ -2336,7 +2426,7 @@ function renderClipFlow(){
   }
   if(clipFlowRuntime.last_error)clipFlowMessage(clipFlowRuntime.last_error,true);
   const timeline=$("#clipFlowSeek"),time=$("#clipFlowTime"),remaining=$("#clipFlowRemaining"),fpsInfo=$("#clipFlowFps");
-  const duration=Math.max(0,Number(clipFlowRuntime.active?clipFlowRuntime.duration_seconds:S?.source_duration_seconds)||0),position=clipFlowDisplayPosition();
+  const duration=clipFlowTimelineDuration(),position=clipFlowDisplayPosition();
   if(timeline){timeline.max=String(duration);timeline.disabled=!(S?.running&&duration>0)||clipFlowSeekBusy||clipFlowActionBusy;if(document.activeElement!==timeline)timeline.value=String(position);}
   if(time&&document.activeElement!==timeline)time.textContent=clipFlowClock(position)+" / "+(duration>0?clipFlowClock(duration):"--:--");
   if(remaining)remaining.textContent="เหลือ "+(duration>0?clipFlowClock(Math.max(0,duration-position)):"--:--");
@@ -2362,6 +2452,9 @@ function renderClipFlow(){
      stopBtn.setAttribute("aria-label",stopBtn.title);
    }
   if(refreshBtn)refreshBtn.disabled=busy;
+   const playClipBtn=$("#sceneClipPlay"),stopClipBtn=$("#sceneClipStop");
+   if(playClipBtn){playClipBtn.disabled=busy||!!(S?.running&&!(clipFlowRuntime.active&&(clipFlowRuntime.phase==="stop"||clipFlowRuntime.stop_requested)));playClipBtn.textContent=(S?.running&&clipFlowRuntime.active&&(clipFlowRuntime.phase==="stop"||clipFlowRuntime.stop_requested))?"↻ เริ่ม Flow ใหม่":"▶ เล่นคลิป / Start Engine";}
+   if(stopClipBtn)stopClipBtn.disabled=busy||!S?.running;
 }
 $("#clipFlowSeek")?.addEventListener("input",clipFlowTimelineInput);
 $("#clipFlowSeek")?.addEventListener("change",async e=>{
@@ -2372,7 +2465,7 @@ $("#clipFlowSeek")?.addEventListener("change",async e=>{
       ? await post("/api/clip-flow/seek",{position_seconds:position})
       : await post("/api/source/seek",{position_seconds:position});
     if(!r?.ok)throw new Error(r?.error||"เลื่อนคลิปไม่สำเร็จ");
-    if(r.runtime){clipFlowRuntime=r.runtime;clipFlowUiPosition=Number(r.runtime.position_seconds)||0;clipFlowUiAt=performance.now();}
+    if(r.runtime){clipFlowRuntime=r.runtime;clipFlowUiIdentity="";clipFlowUpdateClockAnchor(clipFlowRuntime);}
     else {await poll();clipFlowUiPosition=Number(r.position_seconds)||position;clipFlowUiAt=performance.now();}
     renderClipFlow();clipFlowMessage("เลื่อนไป "+clipFlowClock(position)+" แล้ว");
     await loadClipFlow(true);
@@ -2390,7 +2483,7 @@ setInterval(()=>{
   if(time&&document.activeElement!==slider)time.textContent=clipFlowClock(position)+" / "+(duration>0?clipFlowClock(duration):"--:--");
   if(remaining)remaining.textContent="เหลือ "+(duration>0?clipFlowClock(Math.max(0,duration-position)):"--:--");
 },250);
-async function loadClipFlow(quiet=true){
+async function loadClipFlow(quiet=true,refreshSeams=true){
   const requestSeq=++clipFlowLoadSeq;
   const actionEpoch=clipFlowActionEpoch;
   try{
@@ -2399,8 +2492,8 @@ async function loadClipFlow(quiet=true){
     // before Start/Stop repaint the UI with an older runtime snapshot.
     if(requestSeq!==clipFlowLoadSeq||actionEpoch!==clipFlowActionEpoch)return r;
     clipFlowConfig={enabled:r.config?.enabled!==false,open:String(r.config?.open||""),normal:Array.isArray(r.config?.normal)?r.config.normal:[],stop:String(r.config?.stop||"")};
-    clipFlowRuntime=r.runtime||clipFlowRuntime;clipFlowUiPosition=Number(clipFlowRuntime.position_seconds)||0;clipFlowUiAt=performance.now();renderClipFlow();
-    void loadClipFlowSeams();
+    clipFlowRuntime=r.runtime||clipFlowRuntime;clipFlowUpdateClockAnchor(clipFlowRuntime);renderClipFlow();
+    if(refreshSeams)void loadClipFlowSeams();
     if(!quiet)clipFlowMessage("โหลด Clip Flow status แล้ว");
     return r;
   }catch(e){
@@ -2550,8 +2643,7 @@ async function clipFlowAutoMakeFrames(){
       setStatus("เฟรมคั่นครบแล้ว "+allPairs.length+"/"+allPairs.length+" คู่ทิศทาง — Playlist จะใช้เองอัตโนมัติ");
       notify("AI Seam: เฟรมคั่นครบทุกคู่แล้ว");return;
     }
-    const accepted=confirm("Auto Make Frames จะสร้าง AI Seam ที่ยังขาด "+todo.length+" จาก "+allPairs.length+" คู่ทิศทางสำหรับ "+paths.length+" คลิป Normal (รวม A→B และ B→A)\n\nงานนี้อาจใช้เวลามากตามจำนวนคู่และความแรงของเครื่อง ระบบจะบันทึกเฟรมเป็น cache และแทรกให้อัตโนมัติตอนเปลี่ยนคลิป โดยไม่แก้ไฟล์ต้นฉบับ\n\nเริ่มสร้างหรือไม่?");
-    if(!accepted){setStatus("ยกเลิกแล้ว · เฟรมที่มีอยู่ "+(allPairs.length-todo.length)+"/"+allPairs.length+" คู่ยังคงอยู่");return}
+    setStatus("เริ่ม Auto Make Frames · สร้าง "+todo.length+" คู่ที่ขาดจาก "+allPairs.length+" คู่ทั้งหมดโดยอัตโนมัติ");
     // Keep a previously-disabled seam switch off until every missing pair has
     // been generated and verified. A partial Auto Make run must not silently
     // change the live playlist's transition policy.
@@ -2605,7 +2697,7 @@ $("#clipFlowPickStop")?.addEventListener("click",()=>chooseClipFiles("stop"));
 $("#clipFlowClearOpen")?.addEventListener("click",()=>saveClipFlow({open:""},"ล้างคลิป Open แล้ว"));
 $("#clipFlowClearNormal")?.addEventListener("click",()=>saveClipFlow({normal:[]},"ล้างรายการ Normal แล้ว"));
 $("#clipFlowClearStop")?.addEventListener("click",()=>saveClipFlow({stop:""},"ล้างคลิป Stop แล้ว"));
-$("#clipFlowEnabled")?.addEventListener("change",e=>saveClipFlow({enabled:!!e.target.checked},e.target.checked?"เปิด Auto Clip Flow แล้ว":"ปิด Auto Clip Flow แล้ว"));
+
 $("#clipFlowNormalList")?.addEventListener("click",e=>{
   const b=e.target.closest("button[data-clip-remove]");if(!b)return;
   const index=Number(b.dataset.clipRemove),list=[...(clipFlowConfig.normal||[])];
@@ -2678,7 +2770,11 @@ $("#clipFlowStopPreview")?.addEventListener("click",async()=>{
 });
 
 setTimeout(()=>loadClipFlow(true),800);
-setInterval(()=>{if(view==="settings"&&!clipFlowActionBusy)loadClipFlow(true)},2500);
+setInterval(async()=>{
+  if((view!=="scenes"&&view!=="settings")||clipFlowActionBusy||clipFlowSeekBusy||clipFlowStatusPollInFlight)return;
+  clipFlowStatusPollInFlight=true;
+  try{await loadClipFlow(true,false)}finally{clipFlowStatusPollInFlight=false}
+},1000);
 
 
 /* ---------- comments ---------- */

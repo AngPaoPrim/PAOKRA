@@ -5425,7 +5425,16 @@ def control():
             if _ai_seam_generation_active(DATA):
                 return jsonify(ok=False, error="AI Seam compute is running; wait before starting the Engine."), 409
             cfg = _clip_config_snapshot()
-            if cfg.get("enabled") and cfg.get("open") and cfg.get("normal"):
+            playback_mode = str(body.get("playback_mode") or "auto").lower()
+            if playback_mode not in ("auto", "source", "playlist"):
+                return jsonify(ok=False, error="playback_mode must be auto, source, or playlist"), 400
+            use_playlist = (
+                playback_mode == "playlist"
+                or (playback_mode == "auto" and cfg.get("enabled") and cfg.get("open") and cfg.get("normal"))
+            )
+            if use_playlist:
+                if not cfg.get("open") or not cfg.get("normal"):
+                    return jsonify(ok=False, error="Playlist mode requires an Open clip and at least one Normal clip."), 400
                 result = _clip_flow_begin_open(reason="engine_start")
                 if not result.get("ok"):
                     return jsonify(**result), 400

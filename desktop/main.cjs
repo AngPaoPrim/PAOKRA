@@ -722,6 +722,10 @@ let updaterInstance = null;
 let updaterManualCheckRequested = false;
 let updaterCheckInFlight = false;
 let updateInstallPromptShown = false;
+let updateInstallRetryTimer = null;
+let updateInstallInProgress = false;
+let updateInstallWaitLogged = false;
+let updateInstallIdleChecks = 0;
 
 function writeUpdaterLog(level, message) {
   try {
@@ -788,6 +792,83 @@ async function runUpdateCheck(manual = false) {
   }
 }
 
+function scheduleSilentUpdateInstall(delayMs = 5000) {
+  if (updateInstallRetryTimer) clearTimeout(updateInstallRetryTimer);
+  updateInstallRetryTimer = setTimeout(() => {
+    updateInstallRetryTimer = null;
+    void trySilentUpdateInstall();
+  }, Math.max(1000, Number(delayMs) || 5000));
+}
+function queryRuntimeIdleForUpdate() {
+  return new Promise(resolve => {
+    const request = http.get(PAOKRA_URL + "/api/state", { timeout: 1800 }, response => {
+      let data = "";
+      response.setEncoding("utf8");
+      response.on("data", chunk => {
+        data += chunk;
+        if (data.length > 256 * 1024) request.destroy(new Error("runtime state response too large"));
+      });
+      response.on("end", () => {
+        try {
+          if (response.statusCode !== 200) return resolve({ ok: false, reason: "HTTP " + response.statusCode });
+          const state = JSON.parse(data);
+          if (typeof state.running !== "boolean" || typeof state.virtualcam !== "boolean") return resolve({ ok: false, reason: "incomplete runtime state" });
+          resolve({ ok: true, idle: !state.running && !state.virtualcam, running: state.running, virtualcam: state.virtualcam });
+        } catch (error) { resolve({ ok: false, reason: error?.message || "invalid runtime state" }); }
+      });
+    });
+    request.on("timeout", () => request.destroy(new Error("runtime state timeout")));
+    request.on("error", error => resolve({ ok: false, reason: error?.message || "runtime not ready" }));
+  });
+}
+async function trySilentUpdateInstall() {
+  if (!updaterInstance || updateInstallInProgress || app.isQuitting) return;
+  const runtime = await queryRuntimeIdleForUpdate();
+  if (!runtime.ok) {
+    if (!updateInstallWaitLogged) {
+      writeUpdaterLog("info", "Silent install is waiting for runtime status: " + runtime.reason);
+      updateInstallWaitLogged = true;
+    }
+    scheduleSilentUpdateInstall(15000);
+    return;
+  }
+  if (!runtime.idle) {
+    updateInstallIdleChecks = 0;
+    if (!updateInstallWaitLogged) {
+      writeUpdaterLog("info", "Silent install deferred until Engine and Virtual Camera are stopped.");
+      updateInstallWaitLogged = true;
+    }
+    scheduleSilentUpdateInstall(15000);
+    return;
+  }
+  // Never restart PAOKRA in the middle of active UI work. Wait until the
+  // main window is in the background/minimized, then recheck idle twice.
+  if (win && !win.isDestroyed() && win.isVisible() && win.isFocused() && !win.isMinimized()) {
+    updateInstallIdleChecks = 0;
+    if (!updateInstallWaitLogged) {
+      writeUpdaterLog("info", "Silent install deferred while the PAOKRA window is in active use.");
+      updateInstallWaitLogged = true;
+    }
+    scheduleSilentUpdateInstall(15000);
+    return;
+  }
+  updateInstallIdleChecks += 1;
+  if (updateInstallIdleChecks < 2) {
+    scheduleSilentUpdateInstall(5000);
+    return;
+  }
+  updateInstallInProgress = true;
+  if (updateInstallRetryTimer) { clearTimeout(updateInstallRetryTimer); updateInstallRetryTimer = null; }
+  writeUpdaterLog("info", "Runtime idle; installing downloaded update silently and restarting PAOKRA.");
+  try {
+    updaterInstance.quitAndInstall(true, true);
+  } catch (error) {
+    updateInstallInProgress = false;
+    writeUpdaterLog("error", "Silent install could not start: " + (error?.message || String(error)));
+    scheduleSilentUpdateInstall(15000);
+  }
+}
+
 function setupAutoUpdater() {
   if (!app.isPackaged) {
     writeUpdaterLog("info", "Auto-update is available only in packaged builds.");
@@ -843,21 +924,25 @@ function setupAutoUpdater() {
     updaterInstance.on("update-downloaded", info => {
       if (updateInstallPromptShown) return;
       updateInstallPromptShown = true;
+      updateInstallIdleChecks = 0;
+      updateInstallWaitLogged = false;
       const version = String(info?.version || "รุ่นใหม่");
-      writeUpdaterLog("info", "Update downloaded: " + version);
-      showUpdaterDialog({
-        type: "info", title: "PAOKRA Studio — อัปเดตพร้อมติดตั้ง",
-        message: "ดาวน์โหลด PAOKRA Studio " + version + " เสร็จแล้ว",
-        detail: "บันทึกงานของคุณก่อนรีสตาร์ต โปรแกรมจะติดตั้งอัปเดตแล้วเปิดขึ้นใหม่",
-        buttons: ["รีสตาร์ตและติดตั้ง", "ไว้ภายหลัง"], defaultId: 0, cancelId: 1
-      }).then(result => {
-        if (result.response === 0) updaterInstance.quitAndInstall(false, true);
-        else updateInstallPromptShown = false;
-      }).catch(() => { updateInstallPromptShown = false; });
+      writeUpdaterLog("info", "Update downloaded: " + version + "; silent install scheduled.");
+      try {
+        if (Notification.isSupported()) {
+          new Notification({
+            title: "PAOKRA Studio — อัปเดตพร้อมติดตั้ง",
+            body: "ดาวน์โหลดเวอร์ชัน " + version + " แล้ว จะติดตั้งและเปิดโปรแกรมใหม่ให้อัตโนมัติเมื่อ Engine และ Virtual Camera หยุดอยู่"
+          }).show();
+        }
+      } catch (_) {}
+      scheduleSilentUpdateInstall(5000);
     });
     updaterInstance.on("error", error => {
       const detail = error?.message || String(error);
+      if (updateInstallInProgress) updateInstallInProgress = false;
       writeUpdaterLog("error", "Updater error: " + detail);
+      if (updateInstallPromptShown && !app.isQuitting) scheduleSilentUpdateInstall(15000);
       if (updaterManualCheckRequested) {
         showUpdaterDialog({
           type: "warning", title: "PAOKRA Studio — ตรวจอัปเดตไม่สำเร็จ",
