@@ -22,7 +22,7 @@ if (!gotSingleInstanceLock) {
 app.on("second-instance", () => {
   if (win && !win.isDestroyed()) {
     if (win.isMinimized()) win.restore();
-    win.show();
+    if (process.env.PAOKRA_QA_HEADLESS !== "1") win.show();
     win.focus();
   }
 });
@@ -467,7 +467,7 @@ async function showEnvironmentSplash(state) {
   if (!win || win.isDestroyed()) return;
   const html = environmentSplashHTML(state);
   await win.loadURL("data:text/html;charset=UTF-8," + encodeURIComponent(html));
-  win.show();
+  if (process.env.PAOKRA_QA_HEADLESS !== "1") win.show();
 }
 
 async function updateEnvironmentSplash(progress) {
@@ -565,7 +565,7 @@ h1{margin:0;font-size:28px;letter-spacing:-.7px}.sub{margin:9px 0 30px;color:#ae
   // The environment checker uses Windows child processes and can block the Electron
   // main thread for several seconds, so the renderer must get a chance to paint first.
   await win.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(loading));
-  win.show();
+  if (process.env.PAOKRA_QA_HEADLESS !== "1") win.show();
   await new Promise(resolve => setTimeout(resolve, 60));
 
   const isDashboardURL = url => String(url || "").startsWith(PAOKRA_APP_URL);
@@ -1024,7 +1024,7 @@ app.whenReady().then(async () => {
       await win.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(
         environmentSplashHTML(env).replace("กำลังเตรียมสภาพแวดล้อมของเครื่องสำหรับ Virtual Camera + Virtual Audio", "สภาพแวดล้อมพร้อมแล้ว — กำลังเริ่ม PAOKRA Studio")
       ));
-      win.show();
+      if (process.env.PAOKRA_QA_HEADLESS !== "1") win.show();
     }
 
     await updateStartupLoading(18, "กำลังเริ่ม Backend ของ PAOKRA…");

@@ -82,6 +82,70 @@ function applyMenuVisibility(){
   const current=String(location.hash||"").replace(/^#/,"");
   if(current&&hidden.has(current)&&OPTIONAL_MENUS.some(x=>x.id===current))location.hash="#dashboard";
 }
+const NAV_GROUP_STORAGE = "paokra.nav.groups.v1";
+const NAV_GROUP_DEFAULTS = {studio:false,live:true,system:true};
+let navGroupState = {...NAV_GROUP_DEFAULTS};
+
+function navGroupLinks(group){
+  const links=[];
+  let node=group.nextElementSibling;
+  while(node&&!node.classList.contains("side-group")&&!node.classList.contains("side-foot")){
+    if(node.matches?.("a[data-view]"))links.push(node);
+    node=node.nextElementSibling;
+  }
+  return links;
+}
+function renderSidebarGroup(group){
+  const key=group.dataset.navGroup;
+  const collapsed=navGroupState[key]===true;
+  group.setAttribute("aria-expanded",collapsed?"false":"true");
+  group.classList.toggle("pk-nav-group-collapsed",collapsed);
+  navGroupLinks(group).forEach(link=>link.classList.toggle("pk-nav-collapsed",collapsed));
+}
+function saveSidebarGroups(){
+  try{localStorage.setItem(NAV_GROUP_STORAGE,JSON.stringify(navGroupState))}catch(_){}
+}
+function setupSidebarGroups(){
+  try{
+    const saved=JSON.parse(localStorage.getItem(NAV_GROUP_STORAGE)||"{}");
+    for(const key of Object.keys(NAV_GROUP_DEFAULTS)){
+      if(typeof saved?.[key]==="boolean")navGroupState[key]=saved[key];
+    }
+  }catch(_){navGroupState={...NAV_GROUP_DEFAULTS}}
+  const groups=$$(".side .side-group[data-nav-group]");
+  groups.forEach(group=>{
+    const key=group.dataset.navGroup;
+    group.setAttribute("role","button");
+    group.tabIndex=0;
+    if(typeof navGroupState[key]!=="boolean")navGroupState[key]=false;
+    renderSidebarGroup(group);
+    const toggle=()=>{
+      navGroupState[key]=!navGroupState[key];
+      renderSidebarGroup(group);
+      saveSidebarGroups();
+    };
+    group.addEventListener("click",toggle);
+    group.addEventListener("keydown",e=>{
+      if(e.key==="Enter"||e.key===" "){e.preventDefault();toggle()}
+    });
+  });
+  const expandActiveGroup=()=>{
+    const page=String(location.hash||"#dashboard").replace(/^#/,"");
+    const active=$$(".side a[data-view]").find(a=>a.dataset.view===page);
+    if(!active)return;
+    let node=active.previousElementSibling;
+    while(node&&!node.classList.contains("side-group"))node=node.previousElementSibling;
+    if(!node)return;
+    const key=node.dataset.navGroup;
+    if(navGroupState[key]===true){
+      navGroupState[key]=false;
+      renderSidebarGroup(node);
+      saveSidebarGroups();
+    }
+  };
+  window.addEventListener("hashchange",expandActiveGroup);
+  expandActiveGroup();
+}
 function setupMenuVisibilitySettings(){
   const host=document.querySelector('#v-settings [data-set-panel="appearance"]');
   if(!host)return;
@@ -328,6 +392,9 @@ const PALETTE_ITEMS=[
   {label:{th:"Dashboard",en:"Dashboard"},icon:"#i-grid",view:"dashboard"},
   {label:{th:"Scene Builder",en:"Scene Builder"},icon:"#i-layers",view:"scenes"},
   {label:{th:"Video to Filter",en:"Video to Filter"},icon:"#i-wand",view:"video-to-filter"},
+  {label:{th:"Video Editor",en:"Video Editor"},icon:"#i-film",view:"editor"},
+  {label:{th:"AI Seam Studio",en:"AI Seam Studio"},icon:"#i-wand",view:"ai-seam"},
+  {label:{th:"AI Studio",en:"AI Studio"},icon:"#i-wand",view:"ai"},
   {label:{th:"Media",en:"Media"},icon:"#i-image",view:"media"},
   {label:{th:"Live Console",en:"Live Console"},icon:"#i-radio",view:"console"},
   {label:{th:"Comments",en:"Comments"},icon:"#i-chat",view:"comments"},
@@ -362,7 +429,10 @@ function renderPalette(q){
   palQuery=q.trim().toLowerCase();
   const en=L()==="en";
   const items=PALETTE_ITEMS.filter(it=>{
-    const lbl=(en?it.label.en:it.label.th).toLowerCase();
+    if(it.view){
+      const nav=document.querySelector('.side a[data-view="'+it.view+'"]');
+      if(!nav||nav.hidden||nav.classList.contains("pk-nav-hidden"))return false;
+    }    const lbl=(en?it.label.en:it.label.th).toLowerCase();
     return !palQuery||lbl.includes(palQuery);
   });
   palList.innerHTML=items.map((it,i)=>{
@@ -430,6 +500,7 @@ function pkInit(){
   pkI18n();
   fillAll();
   setupMenuVisibilitySettings();
+  setupSidebarGroups();
   /* restore last settings tab */
   if(location.hash==="#settings"){
     let t="appearance";try{t=localStorage.getItem("paokra.settings.tab")||t}catch(_){}

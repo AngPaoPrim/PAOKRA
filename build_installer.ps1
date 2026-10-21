@@ -30,7 +30,7 @@ $Dist = Join-Path $Root "dist"
 $Old = Join-Path $Dist "old"
 New-Item -ItemType Directory -Force -Path $Dist,$Old | Out-Null
 Get-ChildItem -LiteralPath $Dist -File -ErrorAction SilentlyContinue |
-  Where-Object { $_.Name -match "^PAOKRA Studio Setup.*\.exe(\.blockmap)?$" -or $_.Name -match "^paokra-desktop-.*\.nsis\.7z$" -or $_.Name -eq "builder-debug.yml" } |
+  Where-Object { $_.Name -match "^PAOKRA[- ]Studio[- ]Setup.*\.exe(\.blockmap)?$" -or $_.Name -match "^paokra-desktop-.*\.nsis\.7z$" -or $_.Name -eq "builder-debug.yml" } |
   ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination (Join-Path $Old $_.Name) -Force }
 Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $AppDir,$Runtime | Out-Null
@@ -69,30 +69,45 @@ Push-Location $Desktop
 $code = $LASTEXITCODE
 Pop-Location
 if($code -ne 0){ throw "NSIS build failed: $code" }
-$Target = Join-Path $Dist "PAOKRA Studio Setup.exe"
+$Target = Join-Path $Dist "PAOKRA-Studio-Setup.exe"
+$TargetBlockmap = "$Target.blockmap"
 if(-not (Test-Path -LiteralPath $Target)) {
   $candidate = Get-ChildItem -LiteralPath $Dist -File -Filter "*.exe" |
-    Where-Object { $_.Name -like "PAOKRA Studio Setup*" } |
+    Where-Object { $_.Name -like "PAOKRA-Studio-Setup*" -or $_.Name -like "PAOKRA Studio Setup*" } |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
   if($candidate) { Move-Item -LiteralPath $candidate.FullName -Destination $Target -Force }
 }
 if(-not (Test-Path -LiteralPath $Target)) { throw "Final installer was not produced: $Target" }
 Get-ChildItem -LiteralPath $Dist -File -ErrorAction SilentlyContinue |
-  Where-Object { $_.FullName -ne $Target -and ($_.Name -match "^PAOKRA Studio Setup.*\.exe\.blockmap$" -or $_.Name -match "^paokra-desktop-.*\.nsis\.7z$" -or $_.Name -eq "builder-debug.yml") } |
+  Where-Object { $_.FullName -ne $Target -and $_.FullName -ne $TargetBlockmap -and ($_.Name -match "^PAOKRA[- ]Studio[- ]Setup.*\.exe\.blockmap$" -or $_.Name -match "^paokra-desktop-.*\.nsis\.7z$" -or $_.Name -eq "builder-debug.yml") } |
   ForEach-Object { Move-Item -LiteralPath $_.FullName -Destination (Join-Path $Old $_.Name) -Force }
+$QaPython = Join-Path $Root ".venv\Scripts\python.exe"
+$QaPythonArgs = @()
+if(-not (Test-Path -LiteralPath $QaPython)){
+  $QaPython = (Get-Command py -ErrorAction Stop).Source
+  $QaPythonArgs = @("-3")
+}
+if($QaPythonArgs.Count -eq 0){
+  & $QaPython -c "import cv2,numpy,psutil,flask"
+}else{
+  & $QaPython @QaPythonArgs -c "import cv2,numpy,psutil,flask"
+}
+if($LASTEXITCODE -ne 0){ throw "QA Python lacks required modules (cv2, numpy, psutil, flask)." }
+$env:PAOKRA_QA_HEADLESS = "1"
+$env:PAOKRA_QA_SKIP_ENV = "1"
 $QaScript = Join-Path $Root "qa_clipflow_20261017\test_stop_after_current_20261020.py"
 $QaApp = Join-Path $Staging "PAOKRA Studio.exe"
 if(-not (Test-Path -LiteralPath $QaScript)){ throw "Post-build QA script missing: $QaScript" }
 if(-not (Test-Path -LiteralPath $QaApp)){ throw "Packaged app missing for post-build QA: $QaApp" }
 Write-Host "=== POST-BUILD APP QA (Playlist Stop waits for current clip EOF) ===" -ForegroundColor Cyan
-& py -3 $QaScript --app $QaApp --port 8799 --camera
+& $QaPython @QaPythonArgs $QaScript --app $QaApp --port 8799 --camera
 $QaCode = $LASTEXITCODE
 if($QaCode -ne 0){ throw "Post-build PAOKRA app QA failed (exit $QaCode). Installer is NOT marked complete." }
 Write-Host "=== POST-BUILD APP QA PASS ===" -ForegroundColor Green
 $AiSeamQaScript = Join-Path $Root "qa_clipflow_20261017\test_ai_seam_studio_20261020.py"
 if(-not (Test-Path -LiteralPath $AiSeamQaScript)){ throw "AI Seam post-build QA script missing: $AiSeamQaScript" }
 Write-Host "=== POST-BUILD AI SEAM QA (real Vulkan/CPU inference + exact A/B endpoints + packaged Clip Flow insertion) ===" -ForegroundColor Cyan
-& py -3 $AiSeamQaScript --app $QaApp --port 8800 --timeout 150
+& $QaPython @QaPythonArgs $AiSeamQaScript --app $QaApp --port 8800 --timeout 150
 $AiSeamQaCode = $LASTEXITCODE
 if($AiSeamQaCode -ne 0){ throw "Post-build AI Seam Studio QA failed (exit $AiSeamQaCode). Installer is NOT marked complete." }
 Write-Host "=== POST-BUILD AI SEAM QA PASS ===" -ForegroundColor Green

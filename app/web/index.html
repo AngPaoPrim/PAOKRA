@@ -72,7 +72,7 @@ html[data-boot="minimal"] .pkb-row{justify-content:center}
 </style>
 <link rel="stylesheet" href="/style.css?v=20261002-perf4">
 <link rel="stylesheet" href="/_filter_addon.css?v=20261002-filter1">
-<link rel="stylesheet" href="/static/paokra-ui.css?v=pro1">
+<link rel="stylesheet" href="/static/paokra-ui.css?v=uxfix1">
 </head>
 <body>
 <div id="pkBoot" role="status" aria-live="polite">
@@ -117,7 +117,7 @@ html[data-boot="minimal"] .pkb-row{justify-content:center}
 <nav class="side">
   <div class="brand"><span class="logo">PK</span><span class="brand-t"><b>PAOKRA</b><small>Studio</small></span></div>
   <button class="side-search" id="pkSearch" type="button" aria-label="Search"><svg class="i"><use href="#i-search"/></svg><span data-th="ค้นหา เมนู / คำสั่ง…" data-en="Search pages / commands…">ค้นหา เมนู / คำสั่ง…</span><kbd>Ctrl K</kbd></button>
-  <div class="side-group" data-th="สตูดิโอ" data-en="Studio">สตูดิโอ</div>
+  <div class="side-group" data-nav-group="studio" role="button" tabindex="0" aria-expanded="true" data-th="สตูดิโอ" data-en="Studio">สตูดิโอ</div>
   <a href="#dashboard" data-view="dashboard"><svg class="i"><use href="#i-grid"/></svg>Dashboard</a>
   <a href="#scenes" data-view="scenes"><svg class="i"><use href="#i-layers"/></svg>Scene Builder</a>
   <a href="#video-to-filter" data-view="video-to-filter"><svg class="i"><use href="#i-wand"/></svg>Video to Filter</a>
@@ -125,13 +125,13 @@ html[data-boot="minimal"] .pkb-row{justify-content:center}
   <a href="#ai-seam" data-view="ai-seam"><svg class="i"><use href="#i-wand"/></svg>AI Seam Studio</a>
   <a href="#ai" data-view="ai" id="aiNav" hidden><svg class="i"><use href="#i-wand"/></svg>AI Studio</a>
   <a href="#media" data-view="media"><svg class="i"><use href="#i-image"/></svg>Media</a>
-  <div class="side-group" data-th="ไลฟ์" data-en="Live">ไลฟ์</div>
+  <div class="side-group" data-nav-group="live" role="button" tabindex="0" aria-expanded="false" data-th="ไลฟ์" data-en="Live">ไลฟ์</div>
   <a href="#console" data-view="console"><svg class="i"><use href="#i-radio"/></svg>Live Console</a>
   <a href="#comments" data-view="comments"><svg class="i"><use href="#i-chat"/></svg>Comments</a>
   <a href="#manager" data-view="manager"><svg class="i"><use href="#i-bolt"/></svg>LIVE Manager</a>
   <a href="#tiktok-dashboard" data-view="tiktok-dashboard"><svg class="i"><use href="#i-globe"/></svg>TikTok Dashboard</a>
   <a href="#accounts" data-view="accounts"><svg class="i"><use href="#i-users"/></svg>Accounts</a>
-  <div class="side-group" data-th="ระบบ" data-en="System">ระบบ</div>
+  <div class="side-group" data-nav-group="system" role="button" tabindex="0" aria-expanded="false" data-th="ระบบ" data-en="System">ระบบ</div>
   <a href="#logs" data-view="logs"><svg class="i"><use href="#i-log"/></svg>Logs</a>
   <a href="#settings" data-view="settings"><svg class="i"><use href="#i-sliders"/></svg>Settings</a>
   <div class="side-foot"><i class="dot" id="pkFootDot"></i><span id="pkFootTxt">PAOKRA Studio</span></div>
@@ -250,7 +250,7 @@ html[data-boot="minimal"] .pkb-row{justify-content:center}
   <span class="row" style="margin:0;gap:8px">
     <span class="muted small">Arrow = ขยับ 1px · Shift+Arrow = 10px</span>
     <button class="btn ghost" id="sceneRefresh" type="button">↻ Refresh Scene</button>
-    <button class="btn danger" id="sceneStop" type="button">⏹ Stop Clip + Audio</button>
+    <button class="btn danger" id="sceneStop" type="button" hidden aria-hidden="true">⏹ Stop Clip + Audio</button>
   </span>
 </div>
       <div id="stage" class="stage">
@@ -1014,7 +1014,7 @@ html[data-boot="minimal"] .pkb-row{justify-content:center}
 </div>
 <script src="/app.js?v=20261020-ais1"></script>
 <script src="/v2fFilter.js?v=20261002-filter1"></script>
-<script src="/static/paokra-ui.js?v=20261016-tabsfix2"></script>
+<script src="/static/paokra-ui.js?v=uxfix1"></script>
 <script src="/smooth-preview.js?v=20261017-lowpower2"></script>
 </body>
 </html>

@@ -1,6 +1,6 @@
 {
   "name": "paokra-desktop",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "PAOKRA Studio desktop application for video scenes, live console and virtual camera output",
   "repository": {
     "type": "git",
@@ -125,7 +125,7 @@
         "releaseType": "release"
       }
     ],
-    "artifactName": "PAOKRA Studio Setup.${ext}",
+    "artifactName": "PAOKRA-Studio-Setup.${ext}",
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
