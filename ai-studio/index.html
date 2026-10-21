@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; media-src 'self' file:">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PAOKRA AI Studio</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="shell">
+<header class="topbar">
+  <div><div class="brand">PAOKRA <span>AI Studio</span></div><div class="sub">Local AI Video Enhancement · Vulkan / RX570 friendly</div></div>
+  <div class="badge">EXPERIMENTAL</div>
+</header>
+<section class="workspace">
+  <div class="panel">
+    <div class="panel-title">1. เลือกวิดีโอ</div>
+    <button id="pickBtn" class="primary wide">เลือกวิดีโอ</button>
+    <div id="inputPath" class="path muted">ยังไม่ได้เลือกไฟล์</div>
+    <video id="preview" controls playsinline></video>
+  </div>
+  <div class="panel controls">
+    <div class="panel-title">2. AI Enhance</div>
+    <label>ขนาดผลลัพธ์
+      <select id="scale"><option value="2" selected>2× · แนะนำสำหรับ RX570 4GB</option><option value="3">3×</option><option value="4">4× · หนักกว่า</option></select>
+    </label>
+    <label>โมเดล AI
+      <select id="model"><option value="fast" selected>เร็ว (animevideov3) — แนะนำคอมสเปคต่ำ</option><option value="quality">คุณภาพสูง (x4plus) — ช้ากว่ามาก</option></select>
+    </label>
+    <label>การใช้ VRAM
+      <select id="vram"><option value="auto" selected>อัตโนมัติ (ตามการ์ดจอ)</option><option value="low">ประหยัด VRAM</option><option value="max">ใช้เต็มที่ (เร็วสุด)</option></select>
+    </label>
+    <label>Tile
+      <select id="tile"><option value="0" selected>อัตโนมัติ</option><option value="64">64</option><option value="128">128</option><option value="256">256</option><option value="400">400</option></select>
+    </label>
+    <div class="hint">ประมวลผล local ด้วย Real-ESRGAN NCNN/Vulkan ไม่ส่งวิดีโอขึ้น cloud</div>
+    <button id="startBtn" class="primary wide" disabled>✨ เริ่ม AI Enhance</button>
+    <button id="cancelBtn" class="danger wide" disabled>หยุดงาน</button>
+  </div>
+  <div class="panel">
+    <div class="panel-title">3. ผลลัพธ์</div>
+    <button id="outputBtn" class="secondary wide">เลือกตำแหน่งบันทึก</button>
+    <div id="outputPath" class="path muted">ค่าเริ่มต้น: โฟลเดอร์ Videos</div>
+    <button id="openBtn" class="secondary wide" disabled>เปิดโฟลเดอร์ผลลัพธ์</button>
+  </div>
+</section>
+<section class="panel status-panel">
+  <div class="status-head"><span id="stage">พร้อม</span><strong id="percent">0%</strong></div>
+  <div class="progress"><div id="bar"></div></div>
+  <div id="message" class="message">เลือกวิดีโอเพื่อเริ่มทดลอง</div>
+  <div id="meta" class="meta">Model: Real-ESRGAN x4plus · Backend: NCNN/Vulkan</div>
+</section>
+<footer>แยกจาก PAOKRA Studio เดิม · งานทดลองอยู่คนละโปรแกรมและคนละ build</footer>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

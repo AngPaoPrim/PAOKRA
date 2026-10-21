@@ -1,0 +1,141 @@
+{
+  "name": "paokra-desktop",
+  "version": "1.3.8",
+  "description": "PAOKRA Studio desktop application for video scenes, live console and virtual camera output",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AngPaoPrim/PAOKRA.git"
+  },
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "44.9.0",
+    "electron-builder": "26.15.3"
+  },
+  "allowScripts": {
+    "electron@44.9.0": true
+  },
+  "build": {
+    "appId": "com.paokra.studio",
+    "productName": "PAOKRA Studio",
+    "asar": false,
+    "directories": {
+      "output": "../dist"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "environment.cjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "main.cjs",
+        "to": "app/main.cjs"
+      },
+      {
+        "from": "preload.cjs",
+        "to": "app/preload.cjs"
+      },
+      {
+        "from": "environment.cjs",
+        "to": "app/environment.cjs"
+      },
+      {
+        "from": "package.json",
+        "to": "app/package.json"
+      },
+      {
+        "from": "../build/runtime/paokra-server.exe",
+        "to": "paokra/paokra-server.exe"
+      },
+      {
+        "from": "../ai-studio/runtime/ffmpeg.exe",
+        "to": "paokra/ffmpeg/ffmpeg.exe"
+      },
+      {
+        "from": "../build/runtime/ms-playwright",
+        "to": "paokra/ms-playwright"
+      },
+      {
+        "from": "../app/web",
+        "to": "paokra/app/web"
+      },
+      {
+        "from": "../ai-studio/runtime/rife",
+        "to": "paokra/ai-studio/runtime/rife"
+      },
+      {
+        "from": "../app",
+        "to": "paokra/project/app"
+      },
+      {
+        "from": "../cli/tiktokls.exe",
+        "to": "paokra/cli/tiktokls.exe"
+      },
+      {
+        "from": "main.cjs",
+        "to": "paokra/project/desktop/main.cjs"
+      },
+      {
+        "from": "../../paokra-ai/dist-ai/win-unpacked",
+        "to": "paokra-ai"
+      },
+      {
+        "from": "preload.cjs",
+        "to": "paokra/project/desktop/preload.cjs"
+      },
+      {
+        "from": "package.json",
+        "to": "paokra/project/desktop/package.json"
+      },
+      {
+        "from": "../README.md",
+        "to": "paokra/project/README.md"
+      },
+      {
+        "from": "../requirements.txt",
+        "to": "paokra/project/requirements.txt"
+      },
+      {
+        "from": "../PAOKRA.ps1",
+        "to": "paokra/project/PAOKRA.ps1"
+      }
+    ],
+    "win": {
+      "signExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "AngPaoPrim",
+        "repo": "PAOKRA",
+        "releaseType": "release"
+      }
+    ],
+    "artifactName": "PAOKRA Studio Setup.${ext}",
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": false,
+      "shortcutName": "PAOKRA Studio",
+      "include": "build/installer.nsh"
+    }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.10"
+  }
+}

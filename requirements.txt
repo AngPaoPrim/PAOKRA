@@ -1,0 +1,10 @@
+Flask>=3.1,<4
+opencv-contrib-python>=4.10,<5
+numpy>=1.26,<2.0
+mediapipe==0.10.14
+Pillow>=10,<13
+pyvirtualcam>=0.15
+sounddevice>=0.5,<1
+psutil>=5.9,<8
+playwright>=1.50,<2
+websocket-client>=1.8,<2

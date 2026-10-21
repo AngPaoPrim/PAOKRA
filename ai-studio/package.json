@@ -1,0 +1,56 @@
+{
+  "name": "paokra-ai-studio",
+  "version": "0.1.0",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "38.8.6",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.paokra.ai-studio",
+    "productName": "PAOKRA AI Studio",
+    "asar": false,
+    "directories": {
+      "output": "../dist-ai"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "index.html",
+      "style.css",
+      "app.js"
+    ],
+    "extraResources": [
+      {
+        "from": "runtime/realesrgan",
+        "to": "runtime/realesrgan"
+      },
+      {
+        "from": "runtime/ffmpeg.exe",
+        "to": "runtime/ffmpeg.exe"
+      }
+    ],
+    "win": {
+      "signExecutable": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "artifactName": "PAOKRA AI Studio Setup.${ext}",
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "PAOKRA AI Studio"
+    }
+  }
+}
