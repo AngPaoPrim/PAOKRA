@@ -880,7 +880,27 @@ class AiSeamService:
 
     def list_seams(self) -> list[dict[str, Any]]:
         with self.lock:
-            return [dict(s) for s in reversed(self.manifest["seams"])]
+            seams = [dict(s) for s in reversed(self.manifest["seams"])]
+        # Mark cache entries only when the MP4 and both original source signatures remain valid.
+        for seam in seams:
+            available = False
+            try:
+                pa = Path(str(seam.get("from_path") or ""))
+                pb = Path(str(seam.get("to_path") or ""))
+                asset = self._safe_cache_asset(seam.get("asset"))
+                resume = float(seam.get("resume_seconds") or 0)
+                duration = float(seam.get("to_duration") or 0)
+                available = bool(
+                    asset is not None and asset.is_file() and asset.stat().st_size >= 512
+                    and pa.is_file() and pb.is_file()
+                    and _file_signature(pa) == seam.get("from_signature")
+                    and _file_signature(pb) == seam.get("to_signature")
+                    and resume > 0 and duration > resume
+                )
+            except (OSError, TypeError, ValueError, OverflowError):
+                available = False
+            seam["available"] = available
+        return seams
 
     def _prune_cache(self, max_bytes: int = MAX_CACHE_BYTES,
                      preserve_paths: tuple[str | Path, ...] = ()) -> dict[str, int]:
@@ -1152,7 +1172,8 @@ def create_blueprint(root: str | Path, data: str | Path,
 
     @bp.get("/seams")
     def seams_get():
-        return jsonify(ok=True, seams=service.list_seams(), count=len(service.list_seams()))
+        seams = service.list_seams()
+        return jsonify(ok=True, seams=seams, count=len(seams))
 
     @bp.get("/seams/<seam_id>/video")
     def seam_video(seam_id: str):

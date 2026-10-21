@@ -438,6 +438,7 @@ async function aiSeamLoad(silent=false){
  try{
    const [status,clips,seams]=await Promise.all([api("/api/ai-seam/status"),api("/api/ai-seam/clips"),api("/api/ai-seam/seams")]);
    AI_SEAM.status=status;AI_SEAM.settings=status.settings||AI_SEAM.settings;AI_SEAM.clips=Array.isArray(clips.clips)?clips.clips:[];AI_SEAM.seams=Array.isArray(seams.seams)?seams.seams:[];AI_SEAM.environment=status.environment||AI_SEAM.environment;
+   clipFlowSeamCache=AI_SEAM.seams;renderClipFlowSeams();
    if(!AI_SEAM.clips.some(c=>c.id===aiSeamFromId))aiSeamFromId=AI_SEAM.clips[0]?.id||"";
    if(!AI_SEAM.clips.some(c=>c.id===aiSeamToId)||aiSeamToId===aiSeamFromId)aiSeamToId=AI_SEAM.clips.find(c=>c.id!==aiSeamFromId)?.id||"";
    aiSeamApplyLanguage();
@@ -2285,6 +2286,8 @@ let clipFlowActionBusy=false;
 let clipFlowSeekBusy=false;
 let clipFlowUiPosition=0;
 let clipFlowUiAt=performance.now();
+let clipFlowSeamCache=[];
+let clipFlowAutoMaking=false;
 
 const clipBaseName=p=>String(p||"").split(/[\\/]+/).pop();
 function clipFlowMessage(message,bad=false){
@@ -2338,6 +2341,8 @@ function renderClipFlow(){
   if(time&&document.activeElement!==timeline)time.textContent=clipFlowClock(position)+" / "+(duration>0?clipFlowClock(duration):"--:--");
   if(remaining)remaining.textContent="เหลือ "+(duration>0?clipFlowClock(Math.max(0,duration-position)):"--:--");
   if(fpsInfo)fpsInfo.textContent="Source "+(Number(clipFlowRuntime.active?clipFlowRuntime.source_fps:S?.source_fps)>0?Number(clipFlowRuntime.active?clipFlowRuntime.source_fps:S.source_fps).toFixed(2):"—")+" FPS · Output "+(Number(S?.effective_fps||S?.fps)>0?(S.effective_fps||S.fps):"—")+" FPS";
+
+  renderClipFlowSeams();
 
   // Keep the Flow controls usable while a long Stop clip is playing. Starting
   // Open again is an intentional replacement action, not a request to wait for
@@ -2395,6 +2400,7 @@ async function loadClipFlow(quiet=true){
     if(requestSeq!==clipFlowLoadSeq||actionEpoch!==clipFlowActionEpoch)return r;
     clipFlowConfig={enabled:r.config?.enabled!==false,open:String(r.config?.open||""),normal:Array.isArray(r.config?.normal)?r.config.normal:[],stop:String(r.config?.stop||"")};
     clipFlowRuntime=r.runtime||clipFlowRuntime;clipFlowUiPosition=Number(clipFlowRuntime.position_seconds)||0;clipFlowUiAt=performance.now();renderClipFlow();
+    void loadClipFlowSeams();
     if(!quiet)clipFlowMessage("โหลด Clip Flow status แล้ว");
     return r;
   }catch(e){
@@ -2450,6 +2456,149 @@ async function uploadClipFallback(files,role){
   if(role==="normal")await saveClipFlow({normal:[...(clipFlowConfig.normal||[]),...paths].slice(0,100)},"เพิ่มคลิป Normal แล้ว");
   else await saveClipFlow({[role]:paths[0]},role==="open"?"ตั้งค่า Open แล้ว":"ตั้งค่า Stop แล้ว");
 }
+function clipFlowPathKey(value){
+  return String(value||"").trim().replace(/\//g,"\\").replace(/\\+/g,"\\").toLowerCase();
+}
+function clipFlowPairKey(fromPath,toPath){return clipFlowPathKey(fromPath)+"\u0000"+clipFlowPathKey(toPath)}
+function clipFlowPairs(paths){
+  const unique=[],seen=new Set();
+  for(const raw of (Array.isArray(paths)?paths:[])){
+    const p=String(raw||"").trim(),k=clipFlowPathKey(p);
+    if(p&&k&&!seen.has(k)){seen.add(k);unique.push(p)}
+  }
+  const pairs=[];
+  for(const from of unique)for(const to of unique)if(clipFlowPathKey(from)!==clipFlowPathKey(to))pairs.push({from,to});
+  return pairs;
+}
+function clipFlowHasCachedSeam(fromPath,toPath){
+  const key=clipFlowPairKey(fromPath,toPath);
+  return clipFlowSeamCache.some(s=>clipFlowPairKey(s.from_path,s.to_path)===key&&s.available===true);
+}
+async function loadClipFlowSeams(){
+  try{
+    const r=await api("/api/ai-seam/seams");
+    if(Array.isArray(r.seams)){clipFlowSeamCache=r.seams;renderClipFlowSeams()}
+    return r;
+  }catch(e){
+    const status=$("#clipFlowSeamStatus");
+    if(status)status.textContent="อ่านสถานะเฟรมคั่นไม่สำเร็จ: "+e.message;
+    return null;
+  }
+}
+function renderClipFlowSeams(){
+  const list=$("#clipFlowSeamList"),status=$("#clipFlowSeamStatus"),button=$("#clipFlowAutoMake");
+  if(!list||!status||!button)return;
+  const pairs=clipFlowPairs(clipFlowConfig.normal);
+  const ready=pairs.filter(p=>clipFlowHasCachedSeam(p.from,p.to)).length,missing=pairs.length-ready;
+  button.disabled=clipFlowAutoMaking||pairs.length===0||!!clipFlowRuntime.active;
+  button.textContent=clipFlowAutoMaking?"กำลังสร้างเฟรม…":(missing?"Auto Make Frames · "+missing:"Auto Make Frames · พร้อมแล้ว");
+  if(!pairs.length){
+    status.textContent="เพิ่มคลิป Normal อย่างน้อย 2 คลิปเพื่อสร้างเฟรมคั่นแบบ A→B และ B→A";
+    list.replaceChildren();return;
+  }
+  status.textContent="เฟรมคั่นพร้อมใช้ "+ready+"/"+pairs.length+" คู่ทิศทาง · ต้องสร้างเพิ่ม "+missing+" คู่ · ระบบจะแทรกให้อัตโนมัติโดยไม่เพิ่มลงใน Normal";
+  list.replaceChildren();
+  const shown=pairs.slice(0,20);
+  for(const pair of shown){
+    const row=document.createElement("div");row.className="row between";
+    row.style.cssText="gap:8px;align-items:center;flex-wrap:wrap;padding:6px 8px;border:1px solid var(--border,rgba(128,128,128,.22));border-radius:8px";
+    const name=document.createElement("span");name.className="small";name.style.cssText="flex:1;min-width:180px;overflow-wrap:anywhere";
+    name.textContent=clipBaseName(pair.from)+" → "+clipBaseName(pair.to);
+    const badge=document.createElement("span");badge.className="tag"+(clipFlowHasCachedSeam(pair.from,pair.to)?" live":"");
+    badge.textContent=clipFlowHasCachedSeam(pair.from,pair.to)?"พร้อมใช้":"ยังไม่มีเฟรม";
+    row.append(name,badge);list.appendChild(row);
+  }
+  if(pairs.length>shown.length){
+    const more=document.createElement("div");more.className="muted small";more.textContent="แสดง "+shown.length+" จากทั้งหมด "+pairs.length+" คู่";list.appendChild(more);
+  }
+}
+async function clipFlowAutoMakeFrames(){
+  if(clipFlowAutoMaking)return;
+  const paths=[];
+  const seen=new Set();
+  for(const raw of (clipFlowConfig.normal||[])){
+    const p=String(raw||"").trim(),k=clipFlowPathKey(p);
+    if(p&&k&&!seen.has(k)){seen.add(k);paths.push(p)}
+  }
+  if(paths.length<2){clipFlowMessage("ต้องมีคลิป Normal อย่างน้อย 2 คลิปก่อนสร้างเฟรมคั่น",true);return}
+  if(clipFlowRuntime.active){clipFlowMessage("กรุณาหยุด Clip Flow ก่อนสร้าง AI Seam",true);return}
+  clipFlowAutoMaking=true;renderClipFlowSeams();
+  const button=$("#clipFlowAutoMake"),status=$("#clipFlowSeamStatus");
+  const setStatus=m=>{if(status)status.textContent=String(m||"")};
+  try{
+    const health=await api("/api/ai-seam/status");
+    if(health.clip_flow_active||health.engine_running||health.virtualcam_active||health.generation_busy){
+      throw new Error("ปิด Engine และ Virtual Camera แล้วหยุด Clip Flow ก่อน Auto Make Frames เพื่อไม่ให้กระทบ LIVE/FPS");
+    }
+    setStatus("กำลังซิงก์คลิป Normal กับ AI Seam Studio…");
+    const synced=await post("/api/ai-seam/clips",{paths});
+    if(synced.errors?.length)throw new Error("ซิงก์คลิปไม่ครบ: "+synced.errors.slice(0,3).map(x=>(x.path||"")+" "+(x.error||"")).join("; "));
+    const results=await Promise.all([api("/api/ai-seam/clips"),api("/api/ai-seam/seams"),api("/api/ai-seam/status")]);
+    const clipsResult=results[0],seamsResult=results[1],statusResult=results[2];
+    const keyToClip=new Map((clipsResult.clips||[]).map(c=>[clipFlowPathKey(c.path),c]));
+    const unregistered=paths.filter(p=>!keyToClip.has(clipFlowPathKey(p)));
+    if(unregistered.length)throw new Error("AI Seam ไม่พบคลิป: "+unregistered.slice(0,4).map(clipBaseName).join(", "));
+    clipFlowSeamCache=Array.isArray(seamsResult.seams)?seamsResult.seams:[];
+    const allPairs=clipFlowPairs(paths).map(p=>Object.assign(p,{fromClip:keyToClip.get(clipFlowPathKey(p.from)),toClip:keyToClip.get(clipFlowPathKey(p.to))}));
+    const todo=allPairs.filter(p=>!clipFlowHasCachedSeam(p.from,p.to));
+    renderClipFlowSeams();
+    if(!todo.length){
+      if(!statusResult.settings?.enabled){
+        const enabled=await post("/api/ai-seam/settings",{enabled:true});
+        if(!enabled.ok)throw new Error(enabled.error||"เปิด AI Seam ไม่สำเร็จ");
+      }
+      setStatus("เฟรมคั่นครบแล้ว "+allPairs.length+"/"+allPairs.length+" คู่ทิศทาง — Playlist จะใช้เองอัตโนมัติ");
+      notify("AI Seam: เฟรมคั่นครบทุกคู่แล้ว");return;
+    }
+    const accepted=confirm("Auto Make Frames จะสร้าง AI Seam ที่ยังขาด "+todo.length+" จาก "+allPairs.length+" คู่ทิศทางสำหรับ "+paths.length+" คลิป Normal (รวม A→B และ B→A)\n\nงานนี้อาจใช้เวลามากตามจำนวนคู่และความแรงของเครื่อง ระบบจะบันทึกเฟรมเป็น cache และแทรกให้อัตโนมัติตอนเปลี่ยนคลิป โดยไม่แก้ไฟล์ต้นฉบับ\n\nเริ่มสร้างหรือไม่?");
+    if(!accepted){setStatus("ยกเลิกแล้ว · เฟรมที่มีอยู่ "+(allPairs.length-todo.length)+"/"+allPairs.length+" คู่ยังคงอยู่");return}
+    // Keep a previously-disabled seam switch off until every missing pair has
+    // been generated and verified. A partial Auto Make run must not silently
+    // change the live playlist's transition policy.
+    for(let i=0;i<todo.length;i++){
+      const pair=todo[i];
+      setStatus("กำลังสร้าง "+(i+1)+"/"+todo.length+": "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+" · กำลังส่งงาน…");
+      const started=await post("/api/ai-seam/generate",{from_id:pair.fromClip.id,to_id:pair.toClip.id,force:true,compute:statusResult.settings?.compute||"auto"});
+      const jobId=started.job?.id;
+      if(!jobId)throw new Error(started.error||("เริ่มสร้าง "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+" ไม่สำเร็จ"));
+      let complete=false,lastMessage="";
+      const deadline=Date.now()+60*60*1000;
+      while(Date.now()<deadline){
+        await new Promise(resolve=>setTimeout(resolve,900));
+        const current=await api("/api/ai-seam/jobs/"+encodeURIComponent(jobId)),job=current.job||{};
+        const progress=Math.max(0,Math.min(100,Number(job.progress)||0));
+        const message=String(job.message||job.phase||"กำลังประมวลผล");
+        if(message!==lastMessage){
+          lastMessage=message;
+          setStatus("กำลังสร้าง "+(i+1)+"/"+todo.length+": "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+" · "+progress+"% · "+message);
+        }
+        if(job.status==="complete"){complete=true;break}
+        if(job.status==="error")throw new Error(clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+": "+(job.error||job.message||"สร้างเฟรมไม่สำเร็จ"));
+      }
+      if(!complete)throw new Error("หมดเวลารอเฟรม "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+" (60 นาที)");
+      await loadClipFlowSeams();
+      if(!clipFlowHasCachedSeam(pair.from,pair.to))throw new Error("งานสร้างเสร็จแต่ตรวจไม่พบ cache ที่พร้อมใช้: "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to));
+    }
+    const finalPairs=clipFlowPairs(paths),finalReady=finalPairs.filter(p=>clipFlowHasCachedSeam(p.from,p.to)).length;
+    if(finalReady!==finalPairs.length)throw new Error("ตรวจยืนยันเฟรมคั่นไม่ครบ: "+finalReady+"/"+finalPairs.length+" คู่");
+    if(!statusResult.settings?.enabled){
+      const enabled=await post("/api/ai-seam/settings",{enabled:true});
+      if(!enabled.ok||enabled.settings?.enabled!==true)throw new Error(enabled.error||"สร้างเฟรมครบแล้วแต่เปิดใช้ AI Seam ไม่สำเร็จ");
+    }
+    await aiSeamLoad(true);
+    setStatus("เสร็จแล้ว: เฟรมคั่นพร้อมใช้ "+finalReady+"/"+finalPairs.length+" คู่ทิศทาง · Clip Flow จะคั่นให้อัตโนมัติ");
+    notify("Auto Make Frames เสร็จแล้ว "+finalReady+"/"+finalPairs.length+" คู่");
+  }catch(e){
+    setStatus("หยุดสร้างเฟรมคั่น: "+e.message);
+    clipFlowMessage("Auto Make Frames ไม่สำเร็จ: "+e.message,true);
+    notify(e.message,false);
+  }finally{
+    clipFlowAutoMaking=false;
+    if(button)button.disabled=false;
+    renderClipFlowSeams();
+  }
+}
+$("#clipFlowAutoMake")?.addEventListener("click",clipFlowAutoMakeFrames);
 $("#clipFlowPickOpen")?.addEventListener("click",()=>chooseClipFiles("open"));
 $("#clipFlowAddNormal")?.addEventListener("click",()=>chooseClipFiles("normal"));
 $("#clipFlowPickStop")?.addEventListener("click",()=>chooseClipFiles("stop"));

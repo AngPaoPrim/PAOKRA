@@ -169,6 +169,18 @@ async function loadAbout(){
 $("#pkOpenLogs")?.addEventListener("click",()=>B.openPath&&B.openPath("logs"));
 $("#pkOpenData")?.addEventListener("click",()=>B.openPath&&B.openPath("data"));
 $("#pkRestartBackend")?.addEventListener("click",async()=>{notify(T("กำลังรีสตาร์ท Backend…","Restarting backend…"));try{await B.restartBackend()}catch(e){notify(e.message,false)}});
+if(!B.checkForUpdates){const e=$("#pkCheckUpdates");if(e)e.hidden=true}
+$("#pkCheckUpdates")?.addEventListener("click",async()=>{
+  const b=$("#pkCheckUpdates");
+  if(!B.checkForUpdates){notify(T("ระบบตรวจอัปเดตไม่พร้อมใช้งานในโหมดนี้","Update checking is not available in this mode"),false);return}
+  if(b){b.disabled=true;b.textContent=T("กำลังตรวจสอบ…","Checking…")}
+  try{
+    const r=await B.checkForUpdates();
+    if(r?.ok===false){if(!r.dialog)throw new Error(r.error||"Update check failed");return}
+    if(r?.state!=="already-checking"&&r?.state!=="notice")notify(T("ส่งคำขอตรวจสอบเวอร์ชันแล้ว โปรดดูผลจากหน้าต่างแจ้งเตือน","Update check started; see the result dialog"));
+  }catch(e){notify(T("ตรวจสอบการอัปเดตไม่สำเร็จ: ","Update check failed: ")+e.message,false)}
+  finally{if(b){b.disabled=false;b.textContent=L()==="en"?(b.dataset.en||"Check for updates"):(b.dataset.th||"ตรวจสอบการอัปเดต")}}
+});
 $("#pkReload")?.addEventListener("click",()=>location.reload());
 
 /* ───────── boot / loading screen ───────── */

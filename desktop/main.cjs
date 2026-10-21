@@ -743,33 +743,34 @@ async function runUpdateCheck(manual = false) {
       type: "info", title: "PAOKRA Studio", message: "โหมดพัฒนาไม่ตรวจ Auto-update",
       detail: "ระบบอัปเดตจะทำงานในแอปที่ติดตั้งแล้วเท่านั้น", buttons: ["ตกลง"]
     });
-    return;
+    return { ok: false, state: "not-packaged", dialog: Boolean(manual), error: "Auto-update requires the installed desktop app" };
   }
   if (process.env.PAOKRA_DISABLE_UPDATES === "1") {
     if (manual) await showUpdaterDialog({
       type: "info", title: "PAOKRA Studio", message: "ปิดการตรวจอัปเดตไว้สำหรับ QA",
       buttons: ["ตกลง"]
     });
-    return;
+    return { ok: false, state: "disabled", dialog: Boolean(manual), error: "Updates are disabled for QA" };
   }
   if (!updaterInstance) {
     if (manual) await showUpdaterDialog({
       type: "warning", title: "PAOKRA Studio", message: "ระบบตรวจอัปเดตยังไม่พร้อม",
       detail: "ลองเปิดเมนูนี้อีกครั้งหลังหน้าหลักโหลดเสร็จ", buttons: ["ตกลง"]
     });
-    return;
+    return { ok: false, state: "not-ready", dialog: Boolean(manual), error: "Updater is not initialized" };
   }
   if (updaterCheckInFlight) {
     if (manual) await showUpdaterDialog({
       type: "info", title: "PAOKRA Studio", message: "กำลังตรวจสอบเวอร์ชันอยู่แล้ว", buttons: ["ตกลง"]
     });
-    return;
+    return { ok: true, state: "already-checking", dialog: Boolean(manual) };
   }
   updaterCheckInFlight = true;
   updaterManualCheckRequested = Boolean(manual);
   writeUpdaterLog("info", "Check started; version=" + app.getVersion() + "; manual=" + manual);
   try {
-    await updaterInstance.checkForUpdates();
+    const result = await updaterInstance.checkForUpdates();
+    return { ok: true, state: "checking", version: result?.updateInfo?.version || null };
   } catch (error) {
     const detail = error?.message || String(error);
     writeUpdaterLog("error", "Update check failed: " + detail);
@@ -781,6 +782,7 @@ async function runUpdateCheck(manual = false) {
       });
     }
     updaterManualCheckRequested = false;
+    return { ok: false, state: "error", dialog: Boolean(manual), error: detail.slice(0, 1000) };
   } finally {
     updaterCheckInFlight = false;
   }
@@ -872,6 +874,10 @@ function setupAutoUpdater() {
     writeUpdaterLog("error", "Could not initialize electron-updater: " + (error?.message || String(error)));
   }
 }
+
+ipcMain.handle("check-for-updates", async () => {
+  return await runUpdateCheck(true);
+});
 
 function installApplicationMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate([
