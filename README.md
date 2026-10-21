@@ -30,7 +30,7 @@ Starting with desktop version 1.3.8, the packaged Electron app checks GitHub Rel
 The release feed is configured for https://github.com/AngPaoPrim/PAOKRA. To publish a new version:
 1. Bump both `desktop/package.json` and `desktop/package-lock.json` together.
 2. Build and QA a Windows x64 NSIS installer; never publish from the QA build command.
-3. Create a GitHub Release tag matching the app version (for example `v1.3.8`) and upload **all three** generated assets: `PAOKRA Studio Setup.exe`, `PAOKRA Studio Setup.exe.blockmap`, and `latest.yml`. Keep the original generated filenames unchanged.
+3. Create a GitHub Release tag matching the app version (for example `v1.3.8`) and upload **all three** update assets using the exact names referenced by `latest.yml`: `PAOKRA-Studio-Setup.exe`, `PAOKRA-Studio-Setup.exe.blockmap`, and `latest.yml`. The NSIS build output is locally named `PAOKRA Studio Setup.exe`; make a renamed copy for the Release assets so the URL in `latest.yml` matches exactly.
 4. The first release containing this updater must be installed manually by existing 1.3.7 users; older builds do not have update-check code.
 
 ## Build notes
