@@ -97,3 +97,9 @@ _vcam_*
 **/*_tmp.py
 **/*_tmp.js
 **/*.pyc
+# Local generated artifacts in the TikTok CLI tool
+/cli/_newbuild/
+/cli/_newdist/
+/cli/tiktok-ls-cli/_out.txt
+/cli/tiktok-ls-cli/golive_ui_dump.json
+/cli/tiktok-ls-cli/{r.get('ok')}
