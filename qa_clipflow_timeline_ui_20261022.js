@@ -258,9 +258,16 @@ check("Auto-update retries startup checks and explicitly requests silent install
   assert.ok(main.includes('readRuntimeJsonForUpdate("/api/ai-seam/status")'));
   assert.ok(main.includes("appIsQuitting = true"));
 });
-check("System Update FIX offers versions, separate progress stages and verifies downloaded installer", () => {
+check("System Update FIX offers versions, is directly reachable from Settings, and verifies downloaded installer", () => {
   const main = fs.readFileSync(path.join(root, "desktop", "main.cjs"), "utf8");
+  const preload = fs.readFileSync(path.join(root, "desktop", "preload.cjs"), "utf8");
+  const html = fs.readFileSync(path.join(root, "app", "web", "index.html"), "utf8");
+  const aboutUi = fs.readFileSync(path.join(root, "app", "web", "paokra-ui.js"), "utf8");
   const updateUi = fs.readFileSync(path.join(root, "desktop", "system-update.html"), "utf8");
+  assert.ok(html.includes('id="pkOpenSystemUpdateFix"') && html.includes("Choose version (Beta / Stable)"), "Settings > About needs a visible version-selector button");
+  assert.ok(aboutUi.includes('$("#pkOpenSystemUpdateFix")?.addEventListener("click"') && aboutUi.includes("B.openSystemUpdateFix()"), "visible selector button must be wired");
+  assert.ok(preload.includes('openSystemUpdateFix: () => ipcRenderer.invoke("open-system-update-fix")'));
+  assert.ok(main.includes('ipcMain.handle("open-system-update-fix"') && main.includes("openSystemUpdateFix();return{ok:true}"));
   assert.ok(updateUi.includes('id="v"') && updateUi.includes("system-update-list"));
   assert.ok(updateUi.includes("rs.find(x=>x.tag==='v1.4.5-beta.1')||rs.find(x=>x.tag==='v1.4.4-system-update-fix')"), "System Update should default to this beta when available, then fall back to the supplemental v1.4.4 fix");
   assert.ok(updateUi.includes('id="db"') && updateUi.includes('id="ib"'));

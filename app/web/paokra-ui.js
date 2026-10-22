@@ -234,6 +234,18 @@ $("#pkOpenLogs")?.addEventListener("click",()=>B.openPath&&B.openPath("logs"));
 $("#pkOpenData")?.addEventListener("click",()=>B.openPath&&B.openPath("data"));
 $("#pkRestartBackend")?.addEventListener("click",async()=>{notify(T("กำลังรีสตาร์ท Backend…","Restarting backend…"));try{await B.restartBackend()}catch(e){notify(e.message,false)}});
 if(!B.checkForUpdates){const e=$("#pkCheckUpdates");if(e)e.hidden=true}
+if(!B.openSystemUpdateFix){const e=$("#pkOpenSystemUpdateFix");if(e)e.hidden=true}
+$("#pkOpenSystemUpdateFix")?.addEventListener("click",async()=>{
+  const b=$("#pkOpenSystemUpdateFix");
+  if(!B.openSystemUpdateFix){notify(T("ระบบเลือกเวอร์ชันใช้ได้เฉพาะแอป Desktop","Version selector is only available in the desktop app"),false);return}
+  if(b)b.disabled=true;
+  try{
+    const r=await B.openSystemUpdateFix();
+    if(r?.ok===false)throw new Error(r.error||"เปิดหน้าเลือกเวอร์ชันไม่สำเร็จ");
+    notify(T("เปิดหน้าเลือกเวอร์ชันแล้ว — เลือก Beta หรือ Stable ได้จากรายการ","Version selector opened — choose a Beta or Stable release"));
+  }catch(e){notify(T("เปิดหน้าเลือกเวอร์ชันไม่สำเร็จ: ","Could not open version selector: ")+e.message,false)}
+  finally{if(b)b.disabled=false}
+});
 $("#pkCheckUpdates")?.addEventListener("click",async()=>{
   const b=$("#pkCheckUpdates");
   if(!B.checkForUpdates){notify(T("ระบบตรวจอัปเดตไม่พร้อมใช้งานในโหมดนี้","Update checking is not available in this mode"),false);return}

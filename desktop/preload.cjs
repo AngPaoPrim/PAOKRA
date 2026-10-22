@@ -8,5 +8,6 @@ contextBridge.exposeInMainWorld("paokra", {
   getTikTokDashboardStatus: () => ipcRenderer.invoke("tiktok-dashboard-status"),
   openAIStudio: () => ipcRenderer.invoke("open-ai-studio"),
   checkForUpdates: () => ipcRenderer.invoke("check-for-updates"),
+  openSystemUpdateFix: () => ipcRenderer.invoke("open-system-update-fix"),
   updateActivity: () => ipcRenderer.send("update-user-activity")
 });

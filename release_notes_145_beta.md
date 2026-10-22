@@ -1,19 +1,31 @@
-# PAOKRA Studio v1.4.5 Beta 1
+# PAOKRA Studio v1.4.5 Beta 1 — Directed Make Frames / Open → Normal Fix
 
 **Pre-release / QA build. Do not treat as stable.**
 
-## Make Frames / AI Seam
-- Reserve Engine, Virtual Camera, Scene/Output settings, Source selection, seeking, and Playlist edits across the entire Auto Make Frames batch, including the gap between generated transition pairs.
-- Verify generated transition cache entries after each job with bounded retries, and prevent stale asynchronous seam-list responses from replacing newer results.
-- Retry transient AI Seam job-status reads instead of abandoning a long batch immediately after one polling failure.
-- Publish a generation job as `complete` only after the generation lock is released, avoiding the race where the next pair fails with a false “another job is running” response.
-- Keep the last valid composited frame during Engine start while the decoder fills its first frame buffer, reducing a black flash during pre-roll.
+## Auto Make Frames / AI Seam
+- Generate and verify every required directed transition from the configured Playlist before LIVE: Open → each Normal, Open → Stop, every distinct Normal → Normal pair in both directions, and every Normal → Stop.
+- Fix the pre-LIVE Source-FPS profile: when output FPS is set to Source, generated seams and preflight validation use the configured Open clip's cadence—the same cadence Clip Flow uses to start the Virtual Camera—instead of a previously selected Scene Builder preview clip's FPS.
+- Keep exact directed-pair lookup (A → B is never treated as B → A), verify source signatures and output compatibility, and only enable seam playback after the whole matrix is ready.
+- Keep frame generation protected as one batch, including gaps between pair jobs; verify saved cache entries with bounded retries and prevent overlapping source, seek, settings and playlist mutations.
+- Publish a generation job as complete only after the compute lock is released. Hold the last valid compositor frame during Engine pre-roll.
+
+## Clip Flow / LIVE order
+- Normal playback remains shuffled and does not repeat within a cycle.
+- A matching generated bridge is played at the handoff; the destination clip resumes at the correct bridge endpoint.
+- Stop waits for the active clip to finish, then plays Stop to completion, before the existing Protocol shutdown sequence proceeds.
+
+## Version selector / updates
+- Make **Settings → About → Choose version (Beta / Stable)** directly open the release selector.
+- Show available GitHub Releases and retain HTTPS, installer-size and SHA-256 checks before allowing installation.
 
 ## QA included
-- New backend integration test for batch reservation acquire/heartbeat/release/expiry and rejection of conflicting Start/Seek/Source/Scene/AI Seam mutations.
-- Extended Clip Flow / Scene Builder UI regression checks for batch protection, stale cache polling, generation completion ordering, and Engine hold-frame behavior.
-- Existing directed playlist matrix, AI Seam/RIFE inference, cache integrity, Scene Builder, media upload and packaged Engine/Virtual Camera regression suites are run by the installer build script.
+- Clip Flow timeline / updater UI regression suite: 28 checks.
+- Directed playlist matrix: 4 checks, including the full 13-edge case for Open + three Normal clips + Stop.
+- Auto Make Frames reservation / conflict checks and Protocol Stop wait-budget checks.
+- Source-FPS regression for a 24 FPS preview versus a 59.94 FPS Open clip, plus fixed-FPS preservation.
+- AI Seam/RIFE source QA: actual Vulkan GPU and CPU inference, bridge MP4 integrity, exact/reverse directed-cache checks, and untouched source files.
+- The installer script also runs Post-build tests against the packaged application, including Clip Flow/Virtual Camera transition insertion.
 
-## Known beta caveats
-- The current local regression checks exercise synthetic concurrent requests and existing media fixtures; they cannot guarantee behavior for every codec, variable-frame-rate clip, GPU driver or long-running LIVE session.
-- Full manual GUI verification on a separate 8 GiB VRAM computer is not available in this build environment. Keep v1.4.4 stable installed and use this beta only for focused testing until more real-world logs are reviewed.
+## Beta caveats
+- Tests use deterministic local fixtures; they cannot guarantee behavior for every codec, variable-frame-rate file, GPU driver or prolonged real-world LIVE session.
+- Keep the stable release installed until the new beta has been verified with your own playlist and full LIVE/Protocol flow.

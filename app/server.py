@@ -3429,7 +3429,31 @@ def _clip_flow_play_stop_and_wait(reason="live_stop"):
             stop_duration = 0.0
     if not started.get("stop_pending") and stop_duration <= 0.0:
         stop_duration = float(started.get("duration_seconds") or 0.0)
-    timeout = max(30.0, min(7200.0, current_remaining + stop_duration + 30.0))
+
+    # If Stop is requested while an A→B seam is playing, B still has to finish
+    # before the closing Stop clip. The bridge's remaining time alone is not enough
+    # for the LIVE protocol wait budget; include B's unplayed duration as well.
+    destination_remaining = 0.0
+    if started.get("stop_pending") and str(started.get("phase") or "").lower() == "seam":
+        with clip_flow_lock:
+            next_role = str(clip_flow_runtime.get("seam_next_role") or "normal").lower()
+            destination_path = str(clip_flow_runtime.get("seam_next_path") or "").strip()
+            try:
+                destination_duration = max(0.0, float(clip_flow_runtime.get("seam_audio_duration") or 0.0))
+                destination_resume = max(0.0, float(clip_flow_runtime.get("seam_resume_seconds") or 0.0))
+            except (TypeError, ValueError, OverflowError):
+                destination_duration, destination_resume = 0.0, 0.0
+        if next_role == "normal":
+            if destination_duration <= 0.0 and destination_path:
+                try:
+                    _, destination_duration = _probe_source_timing(destination_path, float(source_fps or 30.0))
+                except Exception:
+                    destination_duration = 0.0
+            destination_remaining = max(0.0, destination_duration - destination_resume)
+
+    # Do not cap this budget below the media duration: doing so could let the
+    # LIVE STOP protocol run before a long queued Normal/Stop sequence completes.
+    timeout = max(30.0, current_remaining + destination_remaining + stop_duration + 30.0)
     if not clip_flow_done_event.wait(timeout):
         _clip_flow_finish(error=f"Clip Flow ไม่จบภายใน {timeout:.0f}s", phase="error")
         return {"ok": False, "error": f"Clip Flow ไม่จบภายใน {timeout:.0f} วินาที"}
@@ -6441,6 +6465,7 @@ def _ai_seam_runtime_profile():
             "width": output_width,
             "height": output_height,
             "fps": int(_effective_output_fps() or 30),
+            "fps_mode": str(state.get("fps_mode", "fixed") or "fixed").lower(),
             "fit": str(state.get("source_fit_mode") or "cover"),
             "box_width": int(state.get("source_width", 720) or 720),
             "box_height": int(state.get("source_height", 405) or 405),
@@ -6453,6 +6478,27 @@ def _ai_seam_runtime_profile():
     planned_source = str(config.get("open") or
                         ((config.get("normal") or [""])[0] if config.get("normal") else "") or
                         config.get("stop") or "")
+    # Clip Flow fixes the output cadence from the configured OPEN clip before
+    # starting the camera. Do not build/validate transition MP4s against the
+    # unrelated Scene Builder preview's FPS: if the preview is 24 FPS but OPEN
+    # is 60 FPS, the generated A->B seam would be rejected at the first handoff.
+    # While Flow is idle, predict that same OPEN-derived cadence. Once Flow is
+    # active, _effective_output_fps() sees the camera's already-pinned cadence.
+    if (profile.get("fps_mode") == "source" and planned_source
+            and not profile.get("flow_active")):
+        try:
+            planned_rate, _planned_duration = _probe_source_timing(
+                planned_source, float(source_fps or profile.get("fps") or 30.0)
+            )
+            if planned_rate is not None and float(planned_rate) > 0.0:
+                profile["fps"] = int(
+                    _effective_output_fps(
+                        source_rate_hint=planned_rate, prefer_source_hint=True
+                    ) or 30
+                )
+        except Exception:
+            # Retain the existing detected FPS if OPEN's metadata is unavailable.
+            pass
     profile["box_source"] = planned_source
     profile["box_is_planned"] = False
     # The first selected source is fitted by _set_source_locked when state.source

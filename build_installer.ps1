@@ -49,7 +49,9 @@ $MatrixQaScripts = @(
   (Join-Path $Root ".build-temp\test_clip_flow_seam_automation.py"),
   (Join-Path $Root ".build-temp\test_random_seam_matrix_144.py"),
   (Join-Path $Root ".build-temp\test_validate_transition_matrix_144.py"),
-  (Join-Path $Root "qa_makeframes_stability_145.py")
+  (Join-Path $Root "qa_clipflow_20261017\test_protocol_stop_wait_budget_20261023.py"),
+  (Join-Path $Root "qa_makeframes_stability_145.py"),
+  (Join-Path $Root "qa_clipflow_20261017\test_open_fps_profile_145.py")
 )
 foreach($qaScriptPath in $MatrixQaScripts){
   if(-not (Test-Path -LiteralPath $qaScriptPath)){ throw "Required v1.4.5 Beta QA script missing: $qaScriptPath" }
