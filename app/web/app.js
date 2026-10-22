@@ -2,7 +2,7 @@
 const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>[...r.querySelectorAll(s)];
 const TITLES={dashboard:"Dashboard",accounts:"Accounts",media:"Media",scenes:"Scene Builder",["video-to-filter"]:"Video to Filter",editor:"Video Editor",["ai-seam"]:"AI Seam Studio",ai:"AI Studio",console:"Live Console",manager:"LIVE Manager",["tiktok-dashboard"]:"TikTok Dashboard",comments:"Comments",logs:"Logs",settings:"Settings"};
 const TEXT_FS=28,TEXT_OFF=26;
-let S=null,online=null,view="dashboard",drag=null,toastT=null,nudgeT=null,accSig="",CS=null,selectedCommentId=null;
+let S=null,online=null,view="dashboard",drag=null,toastT=null,nudgeT=null,accSig="",CS=null,selectedCommentId=null,sceneInspectorRequested="";
 let stateSnapshotAt=performance.now(),perfSnapshot=null;
 const LOG=[];
 const J={"Content-Type":"application/json"};
@@ -12,6 +12,9 @@ const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const hhmmss=d=>d.toTimeString().slice(0,8);
 const fmtBytes=n=>{n=Number(n)||0;if(n>=1073741824)return (n/1073741824).toFixed(2)+" GB";if(n>=1048576)return (n/1048576).toFixed(1)+" MB";if(n>=1024)return (n/1024).toFixed(1)+" KB";return Math.max(0,Math.round(n))+" B"};
 const fmtSize=fmtBytes;
+let paokraUpdateActivitySignalAt=0;
+function signalUpdateUserActivity(){const now=Date.now();if(now-paokraUpdateActivitySignalAt<1500)return;paokraUpdateActivitySignalAt=now;try{window.paokra?.updateActivity?.()}catch{}}
+for(const eventName of ["pointerdown","pointermove","keydown","input","change"]){window.addEventListener(eventName,signalUpdateUserActivity,{capture:true,passive:true})}
 
 async function api(url,opt={}){
   const res=await fetch(url,opt);let data={};
@@ -43,7 +46,7 @@ let layerWriteQueue=Promise.resolve();
 function commitLayerOrder(order){
   const requested=Array.isArray(order)?[...order]:[];
   S.layer_order=requested;
-  renderLayers($("#layerList"));renderLayers($("#consoleLayers"));
+  renderLayers($("#layerList"));renderLayers($("#consoleLayers"));renderSceneInspectorPanels();
   // Serialize writes using the exact order requested by each action. The old
   // closure read S.layer_order only when its queue item ran, so rapid reorder
   // clicks could collapse into an unrelated/stale request. Do not swallow a
@@ -53,7 +56,7 @@ function commitLayerOrder(order){
     if(!r?.ok||!Array.isArray(r.order))throw new Error(r?.error||"Layer order was not saved by the backend");
     const latest=Array.isArray(S.layer_order)?S.layer_order:[];
     if(latest.length===requested.length&&latest.every((id,i)=>id===requested[i]))S.layer_order=[...r.order];
-    renderLayers($("#layerList"));renderLayers($("#consoleLayers"));
+    renderLayers($("#layerList"));renderLayers($("#consoleLayers"));renderSceneInspectorPanels();
     return r;
   });
   layerWriteQueue=write;
@@ -400,7 +403,7 @@ function aiSeamRender(){
  const settings=AI_SEAM.settings||{};
  if($("#aisEnabled")&&document.activeElement!==$("#aisEnabled"))$("#aisEnabled").checked=!!settings.enabled;
  if($("#aisCompute")&&document.activeElement!==$("#aisCompute"))$("#aisCompute").value=settings.compute||"auto";
- if($("#aisMaxSide")&&document.activeElement!==$("#aisMaxSide"))$("#aisMaxSide").value=String(settings.max_side||720);
+ if($("#aisMaxSide")&&document.activeElement!==$("#aisMaxSide"))$("#aisMaxSide").value=settings.resolution_mode==="auto"?"auto":String(settings.max_side||720);
  if($("#aisFrames")&&document.activeElement!==$("#aisFrames"))$("#aisFrames").value=String(settings.transition_frames||8);
  const pairValid=!!from&&!!to&&from.id!==to.id;
  const flowActive=!!AI_SEAM.status?.clip_flow_active;
@@ -416,22 +419,23 @@ function aiSeamRender(){
    if(!scan){env.innerHTML=`<div class="unavail">${esc(aiSeamText("environmentNote"))}</div>`}
    else{
      const device=(scan.gpu_device||scan.vulkan_devices?.join(", ")||"No Vulkan GPU detected");
-     const items=[[aiSeamText("device"),device],[aiSeamText("memory"),fmtBytes(scan.ram_available_bytes)],[aiSeamText("disk"),fmtBytes(scan.disk_free_bytes)],[aiSeamText("resolution"),`${scan.recommended_max_side||settings.max_side||720}px`],[aiSeamText("cpuThreads"),`${scan.cpu_logical||"?"}`],[aiSeamText("models"),scan.rife_available&&scan.model_available&&scan.ffmpeg_available?aiSeamText("good"):aiSeamText("rifeMissing")]];
-     env.innerHTML=`<div class="ais-env-grid">${items.map(([k,v])=>`<div class="ais-env-item"><small>${esc(k)}</small><b>${esc(v)}</b></div>`).join("")}</div><div class="ais-env-result ${scan.ok?"ok":"bad"}"><b>${scan.ok?esc(aiSeamText("scanOk")):esc(aiSeamText("scanBad"))}</b><p>${esc(scan.probe?.message||scan.note||"")}</p><p>${esc(scan.recommended_compute||"?").toUpperCase()} · batch 1 · ${(Number(scan.probe?.seconds)||0).toFixed(2)}s probe</p></div>`;
+     const vram=scan.vram_total_bytes?fmtBytes(scan.vram_total_bytes)+" total · "+fmtBytes(scan.vram_available_bytes||0)+" budget free":"Unknown · safe mode";
+     const items=[[aiSeamText("device"),device],["GPU VRAM",vram],[aiSeamText("memory"),fmtBytes(scan.ram_available_bytes)],[aiSeamText("disk"),fmtBytes(scan.disk_free_bytes)],[aiSeamText("resolution"),String(scan.recommended_max_side||settings.max_side||512)+"px"],[aiSeamText("cpuThreads"),String(scan.cpu_logical||"?")],[aiSeamText("models"),scan.rife_available&&scan.model_available&&scan.ffmpeg_available?aiSeamText("good"):aiSeamText("rifeMissing")]];
+     env.innerHTML=`<div class="ais-env-grid">${items.map(([k,v])=>`<div class="ais-env-item"><small>${esc(k)}</small><b>${esc(v)}</b></div>`).join("")}</div><div class="ais-env-result ${scan.ok?"ok":"bad"}"><b>${scan.ok?esc(aiSeamText("scanOk")):esc(aiSeamText("scanBad"))}</b><p>${esc(scan.probe?.message||scan.note||"")}</p><p>${esc(scan.recommended_compute||"?").toUpperCase()} · pair batch 1 · RIFE jobs ${esc(scan.recommended_rife_jobs||"1:1:1")} · ${(Number(scan.probe?.seconds)||0).toFixed(2)}s probe</p><p class="muted small">${esc(scan.vram_note||"")}</p></div>`;
    }
  }
  const analysis=AI_SEAM.analysis;
  const risk=$("#aisPairRisk");if(risk){risk.textContent=analysis?({good:aiSeamText("riskGood"),caution:aiSeamText("riskCaution"),risky:aiSeamText("riskRisky")}[analysis.risk]||analysis.risk):aiSeamText("notAnalyzed");risk.className="tag"+(analysis?.risk==="good"?" live":analysis?.risk==="risky"?" warn":"")}
  const fa=$("#aisFrameA"),fb=$("#aisFrameB");
  if(fa){const u=from?`/api/ai-seam/clips/${encodeURIComponent(from.id)}/frame?at=tail&v=${encodeURIComponent(from.signature?.mtime_ns||"")}`:"";if(fa.dataset.src!==u){fa.dataset.src=u;fa.src=u;fa.style.visibility=u?"visible":"hidden"}}
- if(fb){const t=0;const u=to?`/api/ai-seam/clips/${encodeURIComponent(to.id)}/frame?at=${encodeURIComponent(t)}&v=${encodeURIComponent(to.signature?.mtime_ns||"")}`:"";if(fb.dataset.src!==u){fb.dataset.src=u;fb.src=u;fb.style.visibility=u?"visible":"hidden"}}
+ if(fb){const t=analysis&&analysis.from_id===aiSeamFromId&&analysis.to_id===aiSeamToId?Number(analysis.transition_seconds)||0:0;const u=to?`/api/ai-seam/clips/${encodeURIComponent(to.id)}/frame?at=${encodeURIComponent(t)}&v=${encodeURIComponent(to.signature?.mtime_ns||"")}`:"";if(fb.dataset.src!==u){fb.dataset.src=u;fb.src=u;fb.style.visibility=u?"visible":"hidden"}}
  const ma=$("#aisFrameAMeta"),mb=$("#aisFrameBMeta");if(ma)ma.textContent=from?`${from.width}×${from.height}`:"";if(mb)mb.textContent=to?`${to.width}×${to.height}`:"";
  const output=$("#aisAnalysis");if(output){if(analysis){const msg=analysis.risk==="good"?aiSeamText("riskGood"):analysis.risk==="caution"?aiSeamText("riskCaution"):aiSeamText("riskRisky");output.innerHTML=`<div class="ais-score"><strong>${Math.round((Number(analysis.score)||0)*100)}%</strong><span>${esc(aiSeamText("score"))} · ${esc(msg)}</span></div><p>${esc(from?.name||analysis.from_name||"")} → ${esc(to?.name||analysis.to_name||"")}</p><p>${esc(analysis.transition_frames)} frames · ${esc(analysis.fps)} FPS · ${esc(analysis.input_width)}×${esc(analysis.input_height)} · ${esc(aiSeamFormatDuration(analysis.transition_seconds))}</p><p>${esc(analysis.note||"")}</p>`}else output.innerHTML=`<p class="muted small">${esc(aiSeamText("analysisIntro"))}</p>`}
- const cache=$("#aisCacheList");if(cache){cache.innerHTML="";if(!AI_SEAM.seams.length){const el=document.createElement("div");el.className="unavail";el.textContent=aiSeamText("noneCache");cache.appendChild(el)}else AI_SEAM.seams.slice(0,100).forEach(seam=>{const row=document.createElement("div");row.className="ais-cache-row";const info=document.createElement("div"),head=document.createElement("b"),meta=document.createElement("p");head.textContent=`${seam.from_name||"Clip A"} → ${seam.to_name||"Clip B"}`;meta.textContent=`${Math.round((Number(seam.score)||0)*100)}% visual similarity · ${seam.frame_count||0} frames · ${seam.fps||"?"} FPS · ${fmtBytes(seam.size||0)} · ${String(seam.compute||"?").toUpperCase()}`;info.append(head,meta);const btn=document.createElement("button");btn.className="btn ghost";btn.type="button";btn.textContent=aiSeamText("previewAction");btn.dataset.aisPreview=seam.id;row.append(info,btn);cache.appendChild(row)})}
+ const cache=$("#aisCacheList");if(cache){cache.innerHTML="";if(!AI_SEAM.seams.length){const el=document.createElement("div");el.className="unavail";el.textContent=aiSeamText("noneCache");cache.appendChild(el)}else AI_SEAM.seams.slice(0,100).forEach(seam=>{const row=document.createElement("div");row.className="ais-cache-row";const info=document.createElement("div"),head=document.createElement("b"),meta=document.createElement("p");head.textContent=`${seam.from_name||"Clip A"} → ${seam.to_name||"Clip B"}`;meta.textContent=`${Math.round((Number(seam.score)||0)*100)}% similarity · ${seam.frame_count||0} bridge frames · ${seam.fps||"?"} FPS · ${fmtBytes(seam.size||0)} · ${String(seam.compute||"?").toUpperCase()} · ${seam.compatible?"Output compatible":seam.available?"Needs regenerate":"Cache invalid"}`;info.append(head,meta);const btn=document.createElement("button");btn.className="btn ghost";btn.type="button";btn.textContent=aiSeamText("previewAction");btn.dataset.aisPreview=seam.id;btn.disabled=!seam.compatible;row.append(info,btn);cache.appendChild(row)})}
  const status=AI_SEAM.status;
  const enabled=$("#aisEnableLabel");if(enabled)enabled.textContent=aiSeamText("enabled");
  const batchNote=$("#aisBatchNote");
- if(batchNote)batchNote.textContent=computeBlocked?aiSeamText("busyCompute"):aiSeamText("batch");
+ if(batchNote){const scan=AI_SEAM.environment||AI_SEAM.status?.environment;batchNote.textContent=computeBlocked?aiSeamText("busyCompute"):(scan?"Adaptive low-memory mode · one pair job at a time · RIFE queues "+(scan.recommended_rife_jobs||"1:1:1")+" · recommended input "+(scan.recommended_max_side||512)+"px":"Run Scan to select a VRAM-aware resolution and safe processing queues.");}
 }
 async function aiSeamLoad(silent=false){
  if(aiSeamLoading)return;aiSeamLoading=true;
@@ -483,7 +487,7 @@ function aiSeamSetupEvents(){
  $("#aisAnalyze")?.addEventListener("click",aiSeamAnalyze);
  $("#aisGenerate")?.addEventListener("click",aiSeamGenerate);
  $("#aisSaveSettings")?.addEventListener("click",async()=>{
-   try{const r=await post("/api/ai-seam/settings",{enabled:$("#aisEnabled").checked,compute:$("#aisCompute").value,max_side:Number($("#aisMaxSide").value),transition_frames:Number($("#aisFrames").value)});AI_SEAM.settings=r.settings;aiSeamRender();await aiSeamLoad(true);notify(aiSeamText("settingsSaved"));}
+   try{const side=$("#aisMaxSide").value;const r=await post("/api/ai-seam/settings",{enabled:$("#aisEnabled").checked,compute:$("#aisCompute").value,resolution_mode:side==="auto"?"auto":"manual",max_side:side==="auto"?(Number(AI_SEAM.environment?.recommended_max_side)||512):Number(side),transition_frames:Number($("#aisFrames").value)});AI_SEAM.settings=r.settings;aiSeamRender();await aiSeamLoad(true);notify(aiSeamText("settingsSaved"));}
    catch(e){notify(e.message,false)}
  });
  $("#aisScan")?.addEventListener("click",aiSeamScan);
@@ -495,7 +499,7 @@ function aiSeamSetupEvents(){
    catch(e){notify(e.message,false)}
  });
  $("#aisClearCache")?.addEventListener("click",async()=>{if(!confirm(aiSeamText("cacheConfirm")))return;try{const v=$("#aisPreviewVideo");if(v){v.pause();v.removeAttribute("src");v.load()}const p=$("#aisPreviewPanel");if(p)p.hidden=true;const r=await api("/api/ai-seam/cache",{method:"DELETE"});if(!r.ok)throw new Error(r.error||"Some generated cache files remain in use");AI_SEAM.seams=[];await aiSeamLoad(true);notify(aiSeamText("good"))}catch(e){notify(e.message,false)}});
- $("#aisCacheList")?.addEventListener("click",e=>{const b=e.target.closest("button[data-ais-preview]");if(!b)return;const video=$("#aisPreviewVideo"),panel=$("#aisPreviewPanel");if(!video||!panel)return;video.src=`/api/ai-seam/seams/${encodeURIComponent(b.dataset.aisPreview)}/video`;panel.hidden=false;video.load();panel.scrollIntoView({behavior:"smooth",block:"nearest"})});
+ $("#aisCacheList")?.addEventListener("click",e=>{const b=e.target.closest("button[data-ais-preview]");if(!b)return;const video=$("#aisPreviewVideo"),panel=$("#aisPreviewPanel");if(!video||!panel)return;video.src=`/api/ai-seam/seams/${encodeURIComponent(b.dataset.aisPreview)}/preview`;panel.hidden=false;video.load();panel.scrollIntoView({behavior:"smooth",block:"nearest"})});
 }
 async function aiSeamAnalyze(){
  if(!aiSeamFromId||!aiSeamToId||aiSeamFromId===aiSeamToId){notify(aiSeamText("choosePair"),false);return null}
@@ -536,7 +540,7 @@ function aiSeamWatchJob(jobId){
      if(j.status==="complete"||j.status==="error"){
        clearInterval(aiSeamJobTimer);aiSeamJobTimer=null;aiSeamActiveJob="";
        await aiSeamLoad(true);
-       if(j.status==="complete"&&j.result?.id){const video=$("#aisPreviewVideo"),panel=$("#aisPreviewPanel");if(video&&panel){video.src=`/api/ai-seam/seams/${encodeURIComponent(j.result.id)}/video`;panel.hidden=false;video.load()}notify(`${aiSeamText("generationDone")}: ${j.result.from_name} → ${j.result.to_name}`)}
+       if(j.status==="complete"&&j.result?.id){const video=$("#aisPreviewVideo"),panel=$("#aisPreviewPanel");if(video&&panel){video.src=`/api/ai-seam/seams/${encodeURIComponent(j.result.id)}/preview`;panel.hidden=false;video.load()}notify(`${aiSeamText("generationDone")}: ${j.result.from_name} → ${j.result.to_name}`)}
        else notify(`${aiSeamText("generationFailed")}: ${j.error||"unknown error"}`,false);
      }
    }catch(e){if($("#aisJobMessage"))$("#aisJobMessage").textContent=e.message;}
@@ -618,6 +622,8 @@ function render(){
     pill("#pBackend","bad","Backend offline");pill("#pEngine","","Engine");pill("#pCam","","Virtual Camera");pill("#pLibObs","bad","LibOBS offline");return;
   }
   const isRun=S.running,cam=!!S.virtualcam;
+  const sceneToggle=$("#sceneClipPlay");
+  if(sceneToggle){sceneToggle.disabled=!!engineActionBusy;sceneToggle.textContent=engineActionBusy?"Working…":(isRun?"■ Stop Engine":"▶ Start Engine");sceneToggle.className="btn scene-engine-toggle "+(isRun?"danger":"primary");sceneToggle.setAttribute("aria-pressed",isRun?"true":"false");sceneToggle.title=isRun?"Stop Engine and Virtual Audio":"Start Engine with current Console settings";}
   // Drop decorative GPU effects while frame delivery is active, then restore
   // the user's normal theme when Engine and Virtual Camera are both stopped.
   document.documentElement.dataset.performance=(isRun||cam)?"live":"normal";
@@ -720,7 +726,7 @@ function render(){
   }
   const sig=JSON.stringify(S.accounts);
   if(sig!==accSig){accSig=sig;renderAccounts()}
-  renderLayers($("#layerList"));renderLayers($("#consoleLayers"));
+  renderLayers($("#layerList"));renderLayers($("#consoleLayers"));renderSceneInspectorPanels();
   const rs=$("#setRes"),fp=$("#setFps"),lp=$("#setLoop");
   if(document.activeElement!==rs)rs.value=`${S.width}x${S.height}`;
   if(document.activeElement!==fp)fp.value=S.fps_mode==="source"?"source":String(S.fps);
@@ -764,6 +770,11 @@ function layerDefs(){
   };
   return (Array.isArray(S.layer_order)?S.layer_order:[]).filter(id=>defs[id]).map(id=>defs[id]);
 }
+function renderSceneInspectorPanels(){
+  const textPanel=$("#textInspector"),webPanel=$("#webInspector");
+  if(textPanel)textPanel.hidden=sceneInspectorRequested!=="text";
+  if(webPanel)webPanel.hidden=sceneInspectorRequested!=="web";
+}
 function renderLayers(ul){
   if(!S||!ul)return;
   const defs=layerDefs();
@@ -787,6 +798,8 @@ async function addSceneLayerFromMenu(id){
   // the file dialog, which looks like the Scene Builder ignored the click.
   S=await api("/api/state");
   stateSnapshotAt=performance.now();
+  sceneInspectorRequested=(id==="text"||id==="web")?id:"";
+  renderSceneInspectorPanels();
   if(id==="source"){
     // Video is a singleton source: always open the picker so this action can
     // create the first source OR replace the current clip. Merely re-adding the
@@ -809,7 +822,9 @@ async function addSceneLayerFromMenu(id){
     notify("ใส่ Web URL ใน Inspector แล้วกด Add / Apply ก่อนเพิ่ม Web Layer",false);
     return;
   }
-  if(id==="text"&&!String(S.text||"").trim()&&!(S.texts||[]).length){
+  if(id==="text"){
+    // Each explicit Layers + Text action creates a text layer, including when
+    // other text layers already exist. Inspector visibility is driven by this action.
     await addTextLayer();
     return;
   }
@@ -835,6 +850,7 @@ document.addEventListener("click",e=>{
   const rm=e.target.closest(".layers button[data-remove-layer]");
   if(rm&&S){
     const id=rm.dataset.removeLayer;
+    if(sceneInspectorRequested===id)sceneInspectorRequested="";
     const order=[...(Array.isArray(S.layer_order)?S.layer_order:[])].filter(x=>x!==id);
     run(async()=>{
       try{
@@ -2141,8 +2157,7 @@ async function startEnginePlayback(){
   finally{engineActionBusy=false;await Promise.all([poll(),loadClipFlow(true,false)]);renderClipFlow()}
 }
 $("#bStart")?.addEventListener("click",startEnginePlayback);
-$("#sceneClipPlay")?.addEventListener("click",startEnginePlayback);
-$("#sceneClipStop")?.addEventListener("click",stopEnginePlayback);
+$("#sceneClipPlay")?.addEventListener("click",()=>S?.running?stopEnginePlayback():startEnginePlayback());
 $("#bStop")?.addEventListener("click",stopEnginePlayback);
 $("#sceneStop")?.addEventListener("click",stopEnginePlayback);
 
@@ -2455,9 +2470,8 @@ function renderClipFlow(){
      stopBtn.setAttribute("aria-label",stopBtn.title);
    }
   if(refreshBtn)refreshBtn.disabled=busy;
-   const playClipBtn=$("#sceneClipPlay"),stopClipBtn=$("#sceneClipStop");
-   if(playClipBtn){playClipBtn.disabled=busy||!!(S?.running&&!(clipFlowRuntime.active&&(clipFlowRuntime.phase==="stop"||clipFlowRuntime.stop_requested)));playClipBtn.textContent=(S?.running&&clipFlowRuntime.active&&(clipFlowRuntime.phase==="stop"||clipFlowRuntime.stop_requested))?"↻ เริ่ม Flow ใหม่":"▶ เล่นคลิป / Start Engine";}
-   if(stopClipBtn)stopClipBtn.disabled=busy||!S?.running;
+    // Scene Builder transport is a real single Engine toggle rendered by render().
+    // Clip Flow polling must not overwrite its label or disable Stop while running.
 }
 $("#clipFlowSeek")?.addEventListener("input",clipFlowTimelineInput);
 $("#clipFlowSeek")?.addEventListener("change",async e=>{
@@ -2566,9 +2580,20 @@ function clipFlowPairs(paths){
   for(const from of unique)for(const to of unique)if(clipFlowPathKey(from)!==clipFlowPathKey(to))pairs.push({from,to});
   return pairs;
 }
+function clipFlowPlayablePairs(config=clipFlowConfig){
+  const unique=(values)=>{const out=[],seen=new Set();for(const raw of values){const p=String(raw||"").trim(),k=clipFlowPathKey(p);if(p&&k&&!seen.has(k)){seen.add(k);out.push(p)}}return out};
+  const normals=unique(config.normal||[]),open=String(config.open||"").trim(),stop=String(config.stop||"").trim();
+  const pairs=[],seen=new Set();
+  const add=(from,to,fromRole,toRole)=>{const key=clipFlowPairKey(from,to);if(!from||!to||clipFlowPathKey(from)===clipFlowPathKey(to)||seen.has(key))return;seen.add(key);pairs.push({from,to,fromRole,toRole})};
+  if(open)for(const to of normals)add(open,to,"open","normal");
+  if(open&&stop)add(open,stop,"open","stop");
+  for(const from of normals)for(const to of normals)add(from,to,"normal","normal");
+  if(stop)for(const from of normals)add(from,stop,"normal","stop");
+  return pairs;
+}
 function clipFlowHasCachedSeam(fromPath,toPath){
   const key=clipFlowPairKey(fromPath,toPath);
-  return clipFlowSeamCache.some(s=>clipFlowPairKey(s.from_path,s.to_path)===key&&s.available===true);
+  return clipFlowSeamCache.some(s=>clipFlowPairKey(s.from_path,s.to_path)===key&&s.available===true&&s.compatible===true);
 }
 async function loadClipFlowSeams(){
   try{
@@ -2584,12 +2609,12 @@ async function loadClipFlowSeams(){
 function renderClipFlowSeams(){
   const list=$("#clipFlowSeamList"),status=$("#clipFlowSeamStatus"),button=$("#clipFlowAutoMake");
   if(!list||!status||!button)return;
-  const pairs=clipFlowPairs(clipFlowConfig.normal);
+  const pairs=clipFlowPlayablePairs(clipFlowConfig);
   const ready=pairs.filter(p=>clipFlowHasCachedSeam(p.from,p.to)).length,missing=pairs.length-ready;
   button.disabled=clipFlowAutoMaking||pairs.length===0||!!clipFlowRuntime.active;
   button.textContent=clipFlowAutoMaking?"กำลังสร้างเฟรม…":(missing?"Auto Make Frames · "+missing:"Auto Make Frames · พร้อมแล้ว");
   if(!pairs.length){
-    status.textContent="เพิ่มคลิป Normal อย่างน้อย 2 คลิปเพื่อสร้างเฟรมคั่นแบบ A→B และ B→A";
+    status.textContent="เพิ่มคลิป Normal และตั้งค่า Open/Stop ที่ต้องใช้ก่อนสร้างคู่เฟรมคั่น";
     list.replaceChildren();return;
   }
   status.textContent="เฟรมคั่นพร้อมใช้ "+ready+"/"+pairs.length+" คู่ทิศทาง · ต้องสร้างเพิ่ม "+missing+" คู่ · ระบบจะแทรกให้อัตโนมัติโดยไม่เพิ่มลงใน Normal";
@@ -2599,9 +2624,9 @@ function renderClipFlowSeams(){
     const row=document.createElement("div");row.className="row between";
     row.style.cssText="gap:8px;align-items:center;flex-wrap:wrap;padding:6px 8px;border:1px solid var(--border,rgba(128,128,128,.22));border-radius:8px";
     const name=document.createElement("span");name.className="small";name.style.cssText="flex:1;min-width:180px;overflow-wrap:anywhere";
-    name.textContent=clipBaseName(pair.from)+" → "+clipBaseName(pair.to);
+    name.textContent=(pair.fromRole==="open"&&pair.toRole==="stop"?"OPEN → STOP · ":pair.fromRole==="open"?"OPEN → NORMAL · ":pair.toRole==="stop"?"NORMAL → STOP · ":"NORMAL → NORMAL · ")+clipBaseName(pair.from)+" → "+clipBaseName(pair.to);
     const badge=document.createElement("span");badge.className="tag"+(clipFlowHasCachedSeam(pair.from,pair.to)?" live":"");
-    badge.textContent=clipFlowHasCachedSeam(pair.from,pair.to)?"พร้อมใช้":"ยังไม่มีเฟรม";
+    badge.textContent=clipFlowHasCachedSeam(pair.from,pair.to)?"พร้อมใช้":clipFlowSeamCache.some(s=>clipFlowPairKey(s.from_path,s.to_path)===clipFlowPairKey(pair.from,pair.to)&&s.available===true)?"ต้องสร้างใหม่ (Output/Settings เปลี่ยน)":"ยังไม่มีเฟรม";
     row.append(name,badge);list.appendChild(row);
   }
   if(pairs.length>shown.length){
@@ -2610,23 +2635,22 @@ function renderClipFlowSeams(){
 }
 async function clipFlowAutoMakeFrames(){
   if(clipFlowAutoMaking)return;
-  const paths=[];
-  const seen=new Set();
-  for(const raw of (clipFlowConfig.normal||[])){
-    const p=String(raw||"").trim(),k=clipFlowPathKey(p);
-    if(p&&k&&!seen.has(k)){seen.add(k);paths.push(p)}
-  }
-  if(paths.length<2){clipFlowMessage("ต้องมีคลิป Normal อย่างน้อย 2 คลิปก่อนสร้างเฟรมคั่น",true);return}
   if(clipFlowRuntime.active){clipFlowMessage("กรุณาหยุด Clip Flow ก่อนสร้าง AI Seam",true);return}
   clipFlowAutoMaking=true;renderClipFlowSeams();
   const button=$("#clipFlowAutoMake"),status=$("#clipFlowSeamStatus");
   const setStatus=m=>{if(status)status.textContent=String(m||"")};
   try{
+    const flow=await api("/api/clip-flow");
+    clipFlowConfig={enabled:flow.config?.enabled!==false,open:String(flow.config?.open||""),normal:Array.isArray(flow.config?.normal)?flow.config.normal:[],stop:String(flow.config?.stop||"")};
+    clipFlowRuntime=flow.runtime||clipFlowRuntime;renderClipFlowSeams();
+    const allPairs=clipFlowPlayablePairs(clipFlowConfig);
+    if(!allPairs.length)throw new Error("ตั้งค่าอย่างน้อยหนึ่งคลิป Normal และกำหนด Open/Stop ตามการใช้งานจริงก่อน Auto Make Frames");
+    if(allPairs.length>250){const ok=confirm("ต้องสร้างเฟรมคั่น "+allPairs.length+" คู่แบบมีทิศทาง งานอาจใช้เวลานาน แต่จะไม่ตัดคู่ที่ Playlist สามารถเล่นได้ ต้องการทำต่อหรือไม่?");if(!ok){setStatus("ยกเลิกโดยผู้ใช้ — ยังไม่ได้สร้างเฟรม");return}}
     const health=await api("/api/ai-seam/status");
-    if(health.clip_flow_active||health.engine_running||health.virtualcam_active||health.generation_busy){
-      throw new Error("ปิด Engine และ Virtual Camera แล้วหยุด Clip Flow ก่อน Auto Make Frames เพื่อไม่ให้กระทบ LIVE/FPS");
-    }
-    setStatus("กำลังซิงก์คลิป Normal กับ AI Seam Studio…");
+    if(health.clip_flow_active||health.engine_running||health.virtualcam_active||health.generation_busy)throw new Error("ปิด Engine และ Virtual Camera แล้วหยุด Clip Flow ก่อน Auto Make Frames เพื่อไม่ให้กระทบ LIVE/FPS");
+    setStatus("กำลังซิงก์ Open / Normal / Stop กับ AI Seam Studio…");
+    const paths=[],seen=new Set();
+    for(const raw of [clipFlowConfig.open,...clipFlowConfig.normal,clipFlowConfig.stop]){const p=String(raw||"").trim(),k=clipFlowPathKey(p);if(p&&k&&!seen.has(k)){seen.add(k);paths.push(p)}}
     const synced=await post("/api/ai-seam/clips",{paths});
     if(synced.errors?.length)throw new Error("ซิงก์คลิปไม่ครบ: "+synced.errors.slice(0,3).map(x=>(x.path||"")+" "+(x.error||"")).join("; "));
     const results=await Promise.all([api("/api/ai-seam/clips"),api("/api/ai-seam/seams"),api("/api/ai-seam/status")]);
@@ -2635,24 +2659,20 @@ async function clipFlowAutoMakeFrames(){
     const unregistered=paths.filter(p=>!keyToClip.has(clipFlowPathKey(p)));
     if(unregistered.length)throw new Error("AI Seam ไม่พบคลิป: "+unregistered.slice(0,4).map(clipBaseName).join(", "));
     clipFlowSeamCache=Array.isArray(seamsResult.seams)?seamsResult.seams:[];
-    const allPairs=clipFlowPairs(paths).map(p=>Object.assign(p,{fromClip:keyToClip.get(clipFlowPathKey(p.from)),toClip:keyToClip.get(clipFlowPathKey(p.to))}));
-    const todo=allPairs.filter(p=>!clipFlowHasCachedSeam(p.from,p.to));
+    const mappedPairs=allPairs.map(p=>Object.assign({},p,{fromClip:keyToClip.get(clipFlowPathKey(p.from)),toClip:keyToClip.get(clipFlowPathKey(p.to))}));
+    const unmapped=mappedPairs.filter(p=>!p.fromClip||!p.toClip);
+    if(unmapped.length)throw new Error("แมปคู่คลิปไม่สำเร็จ: "+unmapped.slice(0,4).map(p=>clipBaseName(p.from)+" → "+clipBaseName(p.to)).join("; "));
+    const todo=mappedPairs.filter(p=>!clipFlowHasCachedSeam(p.from,p.to));
     renderClipFlowSeams();
     if(!todo.length){
-      if(!statusResult.settings?.enabled){
-        const enabled=await post("/api/ai-seam/settings",{enabled:true});
-        if(!enabled.ok)throw new Error(enabled.error||"เปิด AI Seam ไม่สำเร็จ");
-      }
-      setStatus("เฟรมคั่นครบแล้ว "+allPairs.length+"/"+allPairs.length+" คู่ทิศทาง — Playlist จะใช้เองอัตโนมัติ");
-      notify("AI Seam: เฟรมคั่นครบทุกคู่แล้ว");return;
+      if(statusResult.settings?.enabled!==true){const enabled=await post("/api/ai-seam/settings",{enabled:true});if(!enabled.ok||enabled.settings?.enabled!==true)throw new Error(enabled.error||"เปิด AI Seam ไม่สำเร็จ")}
+      setStatus("เฟรมคั่นครบแล้ว "+mappedPairs.length+"/"+mappedPairs.length+" คู่ที่ Playlist ใช้งานได้จริง — Open/Normal/Stop ครอบคลุมครบ");
+      notify("AI Seam: เฟรมคั่นครบทุกเส้นทางของ Playlist แล้ว");return;
     }
-    setStatus("เริ่ม Auto Make Frames · สร้าง "+todo.length+" คู่ที่ขาดจาก "+allPairs.length+" คู่ทั้งหมดโดยอัตโนมัติ");
-    // Keep a previously-disabled seam switch off until every missing pair has
-    // been generated and verified. A partial Auto Make run must not silently
-    // change the live playlist's transition policy.
+    setStatus("เริ่ม Auto Make Frames · สร้าง "+todo.length+" คู่ที่ขาดจาก "+mappedPairs.length+" คู่ที่ใช้งานได้จริง");
     for(let i=0;i<todo.length;i++){
-      const pair=todo[i];
-      setStatus("กำลังสร้าง "+(i+1)+"/"+todo.length+": "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+" · กำลังส่งงาน…");
+      const pair=todo[i],edge=pair.fromRole==="open"&&pair.toRole==="stop"?"OPEN → STOP":pair.fromRole==="open"?"OPEN → NORMAL":pair.toRole==="stop"?"NORMAL → STOP":"NORMAL → NORMAL";
+      setStatus("กำลังสร้าง "+(i+1)+"/"+todo.length+": "+edge+" · "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+" · กำลังส่งงาน…");
       const started=await post("/api/ai-seam/generate",{from_id:pair.fromClip.id,to_id:pair.toClip.id,force:true,compute:statusResult.settings?.compute||"auto"});
       const jobId=started.job?.id;
       if(!jobId)throw new Error(started.error||("เริ่มสร้าง "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+" ไม่สำเร็จ"));
@@ -2663,26 +2683,20 @@ async function clipFlowAutoMakeFrames(){
         const current=await api("/api/ai-seam/jobs/"+encodeURIComponent(jobId)),job=current.job||{};
         const progress=Math.max(0,Math.min(100,Number(job.progress)||0));
         const message=String(job.message||job.phase||"กำลังประมวลผล");
-        if(message!==lastMessage){
-          lastMessage=message;
-          setStatus("กำลังสร้าง "+(i+1)+"/"+todo.length+": "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+" · "+progress+"% · "+message);
-        }
+        if(message!==lastMessage){lastMessage=message;setStatus("กำลังสร้าง "+(i+1)+"/"+todo.length+": "+edge+" · "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+" · "+progress+"% · "+message)}
         if(job.status==="complete"){complete=true;break}
         if(job.status==="error")throw new Error(clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+": "+(job.error||job.message||"สร้างเฟรมไม่สำเร็จ"));
       }
       if(!complete)throw new Error("หมดเวลารอเฟรม "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+" (60 นาที)");
       await loadClipFlowSeams();
-      if(!clipFlowHasCachedSeam(pair.from,pair.to))throw new Error("งานสร้างเสร็จแต่ตรวจไม่พบ cache ที่พร้อมใช้: "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to));
+      if(!clipFlowHasCachedSeam(pair.from,pair.to))throw new Error("งานสร้างเสร็จแต่ cache ไม่เข้ากับ Output/Settings ปัจจุบัน: "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to));
     }
-    const finalPairs=clipFlowPairs(paths),finalReady=finalPairs.filter(p=>clipFlowHasCachedSeam(p.from,p.to)).length;
+    const finalPairs=clipFlowPlayablePairs(clipFlowConfig),finalReady=finalPairs.filter(p=>clipFlowHasCachedSeam(p.from,p.to)).length;
     if(finalReady!==finalPairs.length)throw new Error("ตรวจยืนยันเฟรมคั่นไม่ครบ: "+finalReady+"/"+finalPairs.length+" คู่");
-    if(!statusResult.settings?.enabled){
-      const enabled=await post("/api/ai-seam/settings",{enabled:true});
-      if(!enabled.ok||enabled.settings?.enabled!==true)throw new Error(enabled.error||"สร้างเฟรมครบแล้วแต่เปิดใช้ AI Seam ไม่สำเร็จ");
-    }
+    if(statusResult.settings?.enabled!==true){const enabled=await post("/api/ai-seam/settings",{enabled:true});if(!enabled.ok||enabled.settings?.enabled!==true)throw new Error(enabled.error||"สร้างเฟรมครบแล้วแต่เปิดใช้ AI Seam ไม่สำเร็จ")}
     await aiSeamLoad(true);
-    setStatus("เสร็จแล้ว: เฟรมคั่นพร้อมใช้ "+finalReady+"/"+finalPairs.length+" คู่ทิศทาง · Clip Flow จะคั่นให้อัตโนมัติ");
-    notify("Auto Make Frames เสร็จแล้ว "+finalReady+"/"+finalPairs.length+" คู่");
+    setStatus("เสร็จแล้ว: เฟรมคั่นพร้อมใช้ "+finalReady+"/"+finalPairs.length+" คู่ · Open → Normal/Stop, Normal ↔ Normal และ Normal → Stop ครบ");
+    notify("Auto Make Frames เสร็จแล้ว "+finalReady+"/"+finalPairs.length+" คู่ที่ Playlist เล่นได้จริง");
   }catch(e){
     setStatus("หยุดสร้างเฟรมคั่น: "+e.message);
     clipFlowMessage("Auto Make Frames ไม่สำเร็จ: "+e.message,true);

@@ -266,6 +266,11 @@ input[type=number]{width:100%}
 .builder{display:grid;grid-template-columns:220px minmax(0,1fr) 280px;gap:18px;align-items:start}
 .canvas-wrap{display:flex;flex-direction:column;gap:8px;align-items:center}
 .stage-bar{display:flex;justify-content:space-between;font-size:12px;color:var(--mut);padding:0 2px}
+.canvas-wrap{width:100%;min-width:0}
+.stage-bar{width:min(100%,960px);margin-inline:auto}
+.scene-timeline{width:min(100%,960px);box-sizing:border-box;align-self:center}
+.scene-engine-toggle{min-width:190px;justify-content:center;font-weight:700;font-size:13px}
+#textInspector[hidden],#webInspector[hidden]{display:none!important}
 
 /* STAGE — ห้ามมี width ตายตัว ให้ JS กำหนด */
 .stage{

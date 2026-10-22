@@ -15,7 +15,9 @@ import html as _html
 import ctypes
 import comment_bot
 import tiktokls_bridge
-from ai_seam import create_blueprint as _create_ai_seam_blueprint, find_cached_transition, generation_active as _ai_seam_generation_active
+from ai_seam import (create_blueprint as _create_ai_seam_blueprint, find_cached_transition,
+                     generation_active as _ai_seam_generation_active,
+                     validate_transition_matrix as _ai_seam_validate_transition_matrix)
 
 # MediaPipe is optional and must not block PAOKRA startup. Some Windows builds
 # can spend a very long time initializing it, so face-mesh stays disabled until
@@ -287,8 +289,11 @@ clip_flow_runtime = {
     "source_generation": None,
     # Playlist Stop is deferred until the active Open/Normal decoder reaches EOF.
     "stop_requested": False, "pending_stop_path": "",
-    "seam_next_path": "", "seam_resume_seconds": 0.0,
+    "seam_next_path": "", "seam_next_role": "normal", "seam_resume_seconds": 0.0,
     "seam_audio_path": "", "seam_audio_duration": 0.0,
+    # Low-cost runtime diagnostics retain evidence of short transitions even when
+    # an HTTP poll starts after an 8-frame bridge has already ended.
+    "seam_transition_count": 0, "last_seam_transition": None, "last_seam_lookup": None,
 }
 clip_flow_restore_loop = None
 
@@ -2576,6 +2581,9 @@ def api_state():
     s["virtualcam_measured_fps"] = float(camera_status.get("measured_fps") or 0.0)
     s["virtualcam_output_width"] = int(camera_status.get("width") or 0)
     s["virtualcam_output_height"] = int(camera_status.get("height") or 0)
+    # Explicit frame counter lets diagnostics verify that the live renderer kept
+    # advancing when a short generated seam was selected between two source clips.
+    s["render_frame_count"] = int(render_frame_count)
     s["source_duration_seconds"] = round(float(source_loop_duration or 0.0), 6)
     with source_buffer_lock:
         _clock_origin = source_playback_origin
@@ -2651,6 +2659,11 @@ def _clip_flow_public_state():
             "last_error": str(clip_flow_runtime.get("last_error") or ""),
             "reason": str(clip_flow_runtime.get("reason") or ""),
             "changed_at": float(clip_flow_runtime.get("changed_at") or 0.0),
+            "seam_transition_count": int(clip_flow_runtime.get("seam_transition_count") or 0),
+            "last_seam_transition": dict(clip_flow_runtime.get("last_seam_transition") or {})
+                if isinstance(clip_flow_runtime.get("last_seam_transition"), dict) else None,
+            "last_seam_lookup": dict(clip_flow_runtime.get("last_seam_lookup") or {})
+                if isinstance(clip_flow_runtime.get("last_seam_lookup"), dict) else None,
         }
     with lock:
         actual_source = str(state.get("source") or "")
@@ -2885,7 +2898,7 @@ def _clip_flow_controller():
         if worker and worker.is_alive() and worker is not threading.current_thread():
             worker.join(timeout=1.0)
 
-        seam_runtime_profile = _ai_seam_runtime_profile() if phase == "normal" else None
+        seam_runtime_profile = _ai_seam_runtime_profile() if phase in ("open", "normal") else None
         if phase == "stop":
             # A new Flow may have started while this decoder was joining.
             # Finish only the exact Stop generation that emitted this EOF.
@@ -2917,23 +2930,63 @@ def _clip_flow_controller():
                         clip_flow_runtime.get("source_generation") != eof_generation):
                     continue
                 stop_requested = bool(clip_flow_runtime.get("stop_requested"))
-                if stop_requested:
-                    # Stop was requested while this exact Open/Normal clip was
-                    # playing. Do not dequeue another Normal: hand off only now,
-                    # after the current decoder's generation-tagged EOF.
+                if stop_requested and phase != "seam":
+                    # Stop is terminal. If a matching Normal -> Stop bridge was
+                    # generated, play it once, then resume the Stop clip and finish.
+                    # A stop requested while a bridge is already playing skips a
+                    # second bridge and goes directly to Stop after the current EOF.
                     next_path = str(clip_flow_runtime.get("pending_stop_path") or "").strip()
                     if not next_path or not Path(next_path).is_file():
                         transition_error = "คลิป Stop ที่รอเล่นหลังจบคลิปปัจจุบันหายไปหรือเปิดไม่ได้"
                     else:
-                        target_phase = "stop"
-                        clip_flow_eof_generation = None
-                        clip_flow_runtime.update(
-                            phase="stop", current_role="stop", current_clip=next_path,
-                            source_generation=None, normal_queue=[], stop_requested=False,
-                            pending_stop_path="", seam_next_path="", seam_resume_seconds=0.0,
-                            seam_audio_path="", seam_audio_duration=0.0,
-                            reason="stop_after_current_clip", changed_at=time.time()
-                        )
+                        stop_seam = None
+                        if phase in ("open", "normal"):
+                            stop_seam = find_cached_transition(DATA, current_path, next_path,
+                                                               runtime_profile=seam_runtime_profile)
+                        seam_asset = str(stop_seam.get("asset") or "") if stop_seam else ""
+                        stop_resume = max(0.0, float(stop_seam.get("resume_seconds") or 0.0)) if stop_seam else 0.0
+                        stop_duration = max(0.0, float(stop_seam.get("to_duration") or 0.0)) if stop_seam else 0.0
+                        with clip_flow_lock:
+                            clip_flow_runtime["last_seam_lookup"] = {
+                                "from_path": current_path, "to_path": next_path,
+                                "found": bool(stop_seam), "target_role": "stop",
+                                "checked_at": time.time(),
+                                "virtualcam_active": bool(vcam.active),
+                                "virtualcam_measured_fps": float(getattr(vcam, "measured_fps", 0.0) or 0.0),
+                            }
+                        if seam_asset and Path(seam_asset).is_file() and stop_resume > 0 and stop_duration > stop_resume:
+                            target_phase = "seam"
+                            clip_flow_eof_generation = None
+                            clip_flow_runtime["seam_transition_count"] = int(clip_flow_runtime.get("seam_transition_count") or 0) + 1
+                            clip_flow_runtime["last_seam_transition"] = {
+                                "from_path": current_path, "to_path": next_path, "asset": seam_asset,
+                                "target_role": "stop", "selected_at": time.time(),
+                                "resume_seconds": stop_resume, "fps": int(stop_seam.get("fps") or 0),
+                                "frame_count": int(stop_seam.get("frame_count") or 0),
+                                "virtualcam_active": bool(vcam.active),
+                                "virtualcam_measured_fps": float(getattr(vcam, "measured_fps", 0.0) or 0.0),
+                                "render_frame_count": int(render_frame_count),
+                            }
+                            clip_flow_runtime.update(
+                                phase="seam", current_role="seam", current_clip=seam_asset,
+                                source_generation=None, normal_queue=[], stop_requested=False,
+                                pending_stop_path="", seam_next_path=next_path, seam_next_role="stop",
+                                seam_resume_seconds=stop_resume, seam_audio_path=next_path,
+                                seam_audio_duration=stop_duration,
+                                reason="ai_seam_before_stop", changed_at=time.time()
+                            )
+                            next_path = seam_asset
+                            seam_resume_seconds, seam_audio_duration = stop_resume, stop_duration
+                        else:
+                            target_phase = "stop"
+                            clip_flow_eof_generation = None
+                            clip_flow_runtime.update(
+                                phase="stop", current_role="stop", current_clip=next_path,
+                                source_generation=None, normal_queue=[], stop_requested=False,
+                                pending_stop_path="", seam_next_path="", seam_next_role="normal",
+                                seam_resume_seconds=0.0, seam_audio_path="", seam_audio_duration=0.0,
+                                reason="stop_after_current_clip", changed_at=time.time()
+                            )
                 elif phase == "seam":
                     # Resume B at the timestamp used to prepare the bridge endpoint.
                     next_path = str(clip_flow_runtime.get("seam_next_path") or "").strip()
@@ -2944,14 +2997,22 @@ def _clip_flow_controller():
                     if not next_path or not Path(next_path).is_file():
                         transition_error = "AI Seam destination clip is missing; refusing a stale transition"
                     else:
-                        target_phase = "normal"
+                        next_role = str(clip_flow_runtime.get("seam_next_role") or "normal").lower()
+                        target_phase = "stop" if next_role == "stop" else "normal"
                         preserve_seam_audio = True
                         clip_flow_eof_generation = None
+                        # If Stop was queued while a normal-to-normal bridge was
+                        # playing, resume B and keep the request queued until B EOF.
+                        keep_stop_pending = bool(clip_flow_runtime.get("stop_requested")) and target_phase == "normal"
+                        kept_stop_path = str(clip_flow_runtime.get("pending_stop_path") or "") if keep_stop_pending else ""
                         clip_flow_runtime.update(
-                            phase="normal", current_role="normal", current_clip=next_path,
-                            source_generation=None, seam_next_path="", seam_resume_seconds=0.0,
+                            phase=target_phase, current_role=target_phase, current_clip=next_path,
+                            source_generation=None, stop_requested=keep_stop_pending,
+                            pending_stop_path=kept_stop_path,
+                            seam_next_path="", seam_next_role="normal", seam_resume_seconds=0.0,
                             seam_audio_path="", seam_audio_duration=0.0,
-                            reason="ai_seam_destination_resume", changed_at=time.time()
+                            reason="ai_seam_destination_resume" if target_phase == "normal" else "ai_seam_stop_destination",
+                            changed_at=time.time()
                         )
                 else:
                     next_path = _clip_flow_shuffle_next_locked()
@@ -2959,6 +3020,22 @@ def _clip_flow_controller():
                         # Only use a verified cache for this exact directed pair.
                         # Without one, keep the existing normal handoff unchanged.
                         seam = find_cached_transition(DATA, current_path, next_path, runtime_profile=seam_runtime_profile)
+                        with clip_flow_lock:
+                            clip_flow_runtime["last_seam_lookup"] = {
+                                "from_path": current_path, "to_path": next_path,
+                                "found": bool(seam), "target_role": "normal",
+                                "checked_at": time.time(),
+                                "profile": {
+                                    "width": int((seam_runtime_profile or {}).get("width") or 0),
+                                    "height": int((seam_runtime_profile or {}).get("height") or 0),
+                                    "box_width": int((seam_runtime_profile or {}).get("box_width") or 0),
+                                    "box_height": int((seam_runtime_profile or {}).get("box_height") or 0),
+                                    "fps": int((seam_runtime_profile or {}).get("fps") or 0),
+                                    "fit": str((seam_runtime_profile or {}).get("fit") or ""),
+                                },
+                                "virtualcam_active": bool(vcam.active),
+                                "virtualcam_measured_fps": float(getattr(vcam, "measured_fps", 0.0) or 0.0),
+                            }
                         seam_asset = str(seam.get("asset") or "") if seam else ""
                         if seam_asset and Path(seam_asset).is_file():
                             try:
@@ -2969,9 +3046,20 @@ def _clip_flow_controller():
                             if seam_resume_seconds > 0.0 and seam_audio_duration > seam_resume_seconds:
                                 target_phase = "seam"
                                 clip_flow_eof_generation = None
+                                clip_flow_runtime["seam_transition_count"] = int(clip_flow_runtime.get("seam_transition_count") or 0) + 1
+                                clip_flow_runtime["last_seam_transition"] = {
+                                    "from_path": current_path, "to_path": next_path, "asset": seam_asset,
+                                    "target_role": "normal", "selected_at": time.time(),
+                                    "resume_seconds": seam_resume_seconds,
+                                    "fps": int(seam.get("fps") or 0),
+                                    "frame_count": int(seam.get("frame_count") or 0),
+                                    "virtualcam_active": bool(vcam.active),
+                                    "virtualcam_measured_fps": float(getattr(vcam, "measured_fps", 0.0) or 0.0),
+                                    "render_frame_count": int(render_frame_count),
+                                }
                                 clip_flow_runtime.update(
                                     phase="seam", current_role="seam", current_clip=seam_asset,
-                                    source_generation=None, seam_next_path=next_path,
+                                    source_generation=None, seam_next_path=next_path, seam_next_role="normal",
                                     seam_resume_seconds=seam_resume_seconds, seam_audio_path=next_path,
                                     seam_audio_duration=seam_audio_duration,
                                     reason="ai_seam_bridge", changed_at=time.time()
@@ -3030,6 +3118,37 @@ def _clip_flow_begin_open_impl(reason="manual"):
         return {"ok": False, "error": str(exc)}
     if not normals:
         return {"ok": False, "error": "ต้องเพิ่มคลิป Normal อย่างน้อย 1 คลิปก่อนเริ่ม Flow"}
+
+    # If AI Seam is enabled, refuse to start a randomized playlist whose directed
+    # transition matrix is incomplete. Otherwise a newly added clip or changed
+    # output profile could silently turn a generated seam into a hard cut mid-LIVE.
+    stop_path = str(config.get("stop") or "").strip()
+    seam_pairs = [(open_path, target) for target in normals]
+    seam_pairs.extend((source, target) for source in normals for target in normals
+                      if os.path.normcase(source) != os.path.normcase(target))
+    if stop_path and Path(stop_path).is_file():
+        seam_pairs.append((open_path, stop_path))
+        seam_pairs.extend((source, stop_path) for source in normals)
+    try:
+        matrix = _ai_seam_validate_transition_matrix(DATA, seam_pairs)
+    except Exception as exc:
+        return {"ok": False, "error": "AI Seam matrix preflight failed; run Auto Make Frames again: " + str(exc)[:240]}
+    if matrix.get("enabled") and matrix.get("missing"):
+        missing = matrix["missing"]
+        examples = "; ".join(
+            Path(str(item.get("from_path") or "")).name + " → " +
+            Path(str(item.get("to_path") or "")).name
+            for item in missing[:4]
+        )
+        more = " (+" + str(len(missing) - 4) + " more)" if len(missing) > 4 else ""
+        return {
+            "ok": False,
+            "error": "AI Seam is enabled, but Auto Make Frames is incomplete or stale: "
+                     + str(matrix.get("ready", 0)) + "/" + str(matrix.get("total", 0))
+                     + " directed transitions are compatible. Run Auto Make Frames before starting. Missing: "
+                     + examples + more,
+            "seam_matrix": matrix,
+        }
 
     # Pin the camera rate for the entire Flow. Auto first requests the opening
     # clip's rounded FPS and retries common driver modes only if that rate fails.
@@ -3099,7 +3218,8 @@ def _clip_flow_begin_open_impl(reason="manual"):
             normal_queue=[], played_in_cycle=[], previous_normal="",
             source_generation=None, last_error="", reason=str(reason),
             stop_requested=False, pending_stop_path="",
-            seam_next_path="", seam_resume_seconds=0.0, seam_audio_path="", seam_audio_duration=0.0,
+            seam_next_path="", seam_next_role="normal", seam_resume_seconds=0.0, seam_audio_path="", seam_audio_duration=0.0,
+            seam_transition_count=0, last_seam_transition=None, last_seam_lookup=None,
             started_at=time.time(), changed_at=time.time()
         )
     with lock:
@@ -3217,8 +3337,8 @@ def _clip_flow_begin_stop(reason="manual_stop"):
             clip_flow_runtime.update(
                 active=True, phase="stop", current_clip=stop_path, current_role="stop",
                 normal_queue=[], played_in_cycle=[], source_generation=None, last_error="",
-                stop_requested=False, pending_stop_path="",
-                reason=str(reason), changed_at=time.time()
+                stop_requested=False, pending_stop_path="", seam_next_path="", seam_next_role="normal", seam_resume_seconds=0.0,
+                seam_audio_path="", seam_audio_duration=0.0, reason=str(reason), changed_at=time.time()
             )
         with lock:
             state["running"] = True
@@ -6118,13 +6238,65 @@ def overlay_use():
     _attach_image_layer(str(target), iw, ih)
     return jsonify(ok=True, url="/media/" + target.name, layer_order=list(state.get("layer_order", [])))
 
+_AI_SEAM_PLANNED_BOX_CACHE = {}
+_AI_SEAM_PLANNED_BOX_CACHE_LOCK = threading.Lock()
+
+
+def _ai_seam_planned_source_box(source_path, output_width, output_height):
+    """Predict the exact initial Source box set_source() will create for its first clip.
+
+    When no video is selected, the UI still has a 16:9 placeholder transform. AI
+    Seam must not build caches against that placeholder if Open is a portrait clip.
+    The result is cached by file identity and output dimensions; it never changes the
+    live Source or opens a decoder used by the renderer.
+    """
+    try:
+        path = Path(str(source_path or "")).expanduser().resolve()
+        if not path.is_file():
+            return None
+        st = path.stat()
+        out_w = max(1, int(output_width))
+        out_h = max(1, int(output_height))
+        key = (os.path.normcase(str(path)), int(st.st_size),
+               int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))), out_w, out_h)
+        with _AI_SEAM_PLANNED_BOX_CACHE_LOCK:
+            cached = _AI_SEAM_PLANNED_BOX_CACHE.get(key)
+            if cached is not None:
+                return tuple(cached)
+        capture = cv2.VideoCapture(str(path))
+        try:
+            if not capture.isOpened():
+                return None
+            source_w = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            source_h = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        finally:
+            capture.release()
+        if source_w <= 0 or source_h <= 0:
+            return None
+        # Mirror _set_source_locked: preserve ratio and fit inside the output canvas.
+        scale = min(1.0, out_w / float(source_w), out_h / float(source_h))
+        result = (max(40, int(round(source_w * scale))),
+                  max(40, int(round(source_h * scale))))
+        with _AI_SEAM_PLANNED_BOX_CACHE_LOCK:
+            _AI_SEAM_PLANNED_BOX_CACHE[key] = result
+            while len(_AI_SEAM_PLANNED_BOX_CACHE) > 32:
+                _AI_SEAM_PLANNED_BOX_CACHE.pop(next(iter(_AI_SEAM_PLANNED_BOX_CACHE)))
+        return result
+    except (OSError, TypeError, ValueError, OverflowError):
+        return None
+    except Exception:
+        return None
+
+
 def _ai_seam_runtime_profile():
     # Avoid holding the engine lock and Clip Flow lock at the same time.
     config = _clip_config_snapshot()
     with lock:
+        output_width = int(state.get("width", 720) or 720)
+        output_height = int(state.get("height", 1280) or 1280)
         profile = {
-            "width": int(state.get("width", 720) or 720),
-            "height": int(state.get("height", 1280) or 1280),
+            "width": output_width,
+            "height": output_height,
             "fps": int(_effective_output_fps() or 30),
             "fit": str(state.get("source_fit_mode") or "cover"),
             "box_width": int(state.get("source_width", 720) or 720),
@@ -6135,7 +6307,20 @@ def _ai_seam_runtime_profile():
         }
     with clip_flow_lock:
         profile["flow_active"] = bool(clip_flow_runtime.get("active"))
-    profile["box_source"] = str(config.get("open") or "")
+    planned_source = str(config.get("open") or
+                        ((config.get("normal") or [""])[0] if config.get("normal") else "") or
+                        config.get("stop") or "")
+    profile["box_source"] = planned_source
+    profile["box_is_planned"] = False
+    # The first selected source is fitted by _set_source_locked when state.source
+    # is empty; the persistent 720x405 placeholder is NOT the future live transform.
+    # Later Clip Flow switches preserve the existing Source transform, so don't
+    # replace box dimensions once a real source is selected.
+    if not profile["source"] and not profile["flow_active"] and planned_source:
+        planned_box = _ai_seam_planned_source_box(planned_source, output_width, output_height)
+        if planned_box:
+            profile["box_width"], profile["box_height"] = planned_box
+            profile["box_is_planned"] = True
     return profile
 
 def _ai_seam_release_cache_sources(seams):

@@ -265,32 +265,32 @@ html[data-boot="minimal"] .pkb-row{justify-content:center}
         <div id="dragText" class="item text-item" tabindex="0"></div>
         <div id="dragImage" class="item image-item" tabindex="0" hidden><img draggable="false" alt=""></div>
       </div>
-    </div>
-    <aside class="card">
-      <div class="card-mini" style="margin-bottom:12px;display:flex;flex-direction:column;gap:8px" aria-label="Clip timeline">
+      <div class="card-mini scene-timeline" style="margin-bottom:0;display:flex;flex-direction:column;gap:8px" aria-label="Clip timeline">
         <div class="row between" style="gap:8px;align-items:center;flex-wrap:wrap">
           <b>ตำแหน่งคลิป</b><span id="clipFlowTime" class="small" aria-live="polite">00:00 / --:--</span>
           <span id="clipFlowRemaining" class="small">เหลือ --:--</span>
         </div>
         <input id="clipFlowSeek" type="range" min="0" max="0" step="0.1" value="0" disabled aria-label="เลื่อนตำแหน่งคลิปปัจจุบัน">
         <div class="row" style="gap:8px;margin:0;flex-wrap:wrap">
-          <button class="btn primary" id="sceneClipPlay" type="button">▶ เล่นคลิป / Start Engine</button>
-          <button class="btn ghost" id="sceneClipStop" type="button">■ หยุดคลิป / Stop Engine</button>
+          <button class="btn primary scene-engine-toggle" id="sceneClipPlay" type="button" aria-pressed="false">▶ Start Engine</button>
         </div>
         <div id="clipFlowFps" class="muted small">Source — FPS · Output — FPS</div>
         <div id="sceneClipStatus" class="muted small" role="status" aria-live="polite"></div>
       </div>
+    </div>
+    <aside class="card">
       <h2>Inspector</h2>
-      <div class="row" style="margin:0 0 10px"><button class="btn primary" id="addText">+ เพิ่มข้อความ</button></div>
+      <div id="textInspector" hidden>
       <div id="textLayers" class="text-layers"></div>
       <div class="field"><label>Text</label><textarea id="inText" rows="3" maxlength="4000" placeholder="พิมพ์ข้อความ…"></textarea><div class="field-meta"><span>รองรับหลายบรรทัด</span><span id="textCount">0 / 4000</span></div></div>
       <div class="two"><div class="field"><label>Text X</label><input id="inTX" type="number"></div><div class="field"><label>Text Y</label><input id="inTY" type="number"></div></div>
       <div class="field"><label>Text Size (px)</label><input id="inTSize" type="number" min="6" max="400" step="1"></div>
         <div class="two"><label class="check"><input id="inTScroll" type="checkbox"> Scroll / marquee text</label><div class="field"><label>Scroll speed (px/s)</label><input id="inTScrollSpeed" type="number" min="20" max="600" step="10" value="120"></div></div>
-        <p class="muted small">Text appears only after Add Text. Scroll moves right-to-left; static text keeps its X/Y position.</p>
+        <p class="muted small">ใช้ Layers + Text เพื่อเพิ่ม Text Layer ก่อน · Scroll moves right-to-left; static text keeps its X/Y position.</p>
       <p class="muted small">รองรับภาษาไทยและ Unicode · ปรับขนาดได้ตั้งแต่ 6–400 px</p>
+      </div>
       <div class="hr"></div>
-      <div class="card-mini">
+      <div id="webInspector" class="card-mini" hidden>
         <div class="row between"><h2>Web Source</h2><span class="tag" id="webSourceTag">OFF</span></div>
         <p class="muted small">เปิดเว็บไว้เบื้องหลัง แล้วส่งภาพเข้า compositor เช่นนาฬิกา, dashboard หรือ widget</p>
         <p class="muted small">Web output stays OFF until Add / Apply. Remove clears it from the scene and compositor.</p>
@@ -656,7 +656,7 @@ html[data-boot="minimal"] .pkb-row{justify-content:center}
         <h2 id="aisSettingsTitle">AI Settings</h2>
         <div class="field"><label for="aisCompute" id="aisComputeLabel">Compute device</label><select id="aisCompute"><option value="auto">Auto · scan and choose</option><option value="gpu">GPU · Vulkan</option><option value="cpu">CPU</option></select></div>
         <div class="two">
-          <div class="field"><label for="aisMaxSide" id="aisResolutionLabel">AI input size</label><select id="aisMaxSide"><option value="512">Low · 512 px</option><option value="720" selected>Balanced · 720 px</option><option value="960">High · 960 px</option></select></div>
+          <div class="field"><label for="aisMaxSide" id="aisResolutionLabel">AI input size</label><select id="aisMaxSide"><option value="auto" selected>Auto · VRAM/RAM recommended</option><option value="512">Low · 512 px</option><option value="720">Balanced · 720 px</option><option value="960">High · 960 px</option></select></div>
           <div class="field"><label for="aisFrames" id="aisFramesLabel">Bridge frames</label><select id="aisFrames"><option value="4">4 frames</option><option value="6">6 frames</option><option value="8" selected>8 frames</option><option value="10">10 frames</option><option value="12">12 frames</option></select></div>
         </div>
         <label class="check ais-enable"><input id="aisEnabled" type="checkbox"><span><b id="aisEnableLabel">Use generated seams in Clip Flow</b><small id="aisEnableNote">Only exact, verified A → B cache matches are used.</small></span></label>
@@ -679,7 +679,7 @@ html[data-boot="minimal"] .pkb-row{justify-content:center}
     </div>
     <div id="aisAnalysis" class="ais-analysis" aria-live="polite"><p class="muted small">RIFE estimates intermediate motion; it cannot understand a scene or guarantee identical people/poses. Review the result before enabling it for Live.</p></div>
     <div id="aisJobPanel" class="ais-job" hidden><div class="row between"><b id="aisJobLabel">Generation status</b><span id="aisJobPercent">0%</span></div><div class="ais-progress"><i id="aisJobBar"></i></div><p id="aisJobMessage" class="muted small"></p></div>
-    <div id="aisPreviewPanel" class="ais-generated" hidden><div><b id="aisPreviewLabel">Generated transition preview</b><p class="muted small" id="aisPreviewNote">Video only; the destination clip’s audio is played continuously under the short bridge.</p></div><video id="aisPreviewVideo" controls muted playsinline preload="metadata"></video></div>
+    <div id="aisPreviewPanel" class="ais-generated" hidden><div><b id="aisPreviewLabel">Generated transition preview</b><p class="muted small" id="aisPreviewNote">Sequence preview: source tail → generated bridge frames → destination at the resume timestamp. Preview is video-only; during Clip Flow, destination audio continues under the short bridge.</p></div><video id="aisPreviewVideo" controls muted playsinline preload="metadata"></video></div>
   </div>
   <div class="card wide-card ais-cache-card">
     <div class="row between"><div><h2 id="aisCacheTitle">Verified transition cache</h2><p class="muted small" id="aisCacheNote">Only these generated pairs can alter playback. Clear cache removes generated files, not your source clips.</p></div><button class="btn ghost" type="button" id="aisClearCache">Clear generated cache</button></div>
@@ -946,7 +946,7 @@ html[data-boot="minimal"] .pkb-row{justify-content:center}
 
       <div class="card-mini" id="clipFlowSeamCard" style="margin-top:12px">
         <div class="row between" style="align-items:center;gap:10px;flex-wrap:wrap">
-          <div><b>SEAM · เฟรมคั่นระหว่างคลิป</b><p class="muted small" style="margin:4px 0 0">สร้างเฟรมคั่นจากคลิป Normal ทุกคู่และทุกทิศทาง เช่น 1→2 และ 2→1 ระบบจะแทรกให้อัตโนมัติเมื่อสลับคลิป</p></div>
+          <div><b>SEAM · เฟรมคั่นระหว่างคลิป</b><p class="muted small" style="margin:4px 0 0">สร้างทุกคู่ที่ Playlist ใช้ได้: Open→Normal/Stop, Normal↔Normal และ Normal→Stop โดยคิดแยกทุกทิศทาง ระบบแทรกให้อัตโนมัติเมื่อคู่เฟรมตรงกับ Output และ AI Settings ปัจจุบัน</p></div>
           <button class="btn primary" id="clipFlowAutoMake" type="button">Auto Make Frames</button>
         </div>
         <div id="clipFlowSeamStatus" class="muted small" role="status" aria-live="polite" style="margin-top:8px">เพิ่มคลิป Normal อย่างน้อย 2 คลิปเพื่อเริ่มสร้างเฟรมคั่น</div>

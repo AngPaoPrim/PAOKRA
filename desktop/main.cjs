@@ -530,6 +530,7 @@ async function createWindow() {
       preload: path.join(__dirname, "preload.cjs")
     }
   });
+  win.on("focus", () => { lastUserActivityAt = Date.now(); });
   traceTailwindWarnings(win.webContents, "main-studio-window");
   // Close auxiliary off-screen windows when the main Studio window is closed.
   // Otherwise Electron's window-all-closed event never fires, before-quit does
@@ -718,6 +719,7 @@ ipcMain.handle("select-videos", async (_event, options = {}) => {
 });
 
 
+let appIsQuitting = false;
 let updaterInstance = null;
 let updaterManualCheckRequested = false;
 let updaterCheckInFlight = false;
@@ -726,6 +728,10 @@ let updateInstallRetryTimer = null;
 let updateInstallInProgress = false;
 let updateInstallWaitLogged = false;
 let updateInstallIdleChecks = 0;
+let updateCheckRetryTimer = null;
+let updateCheckRetryCount = 0;
+let updateCheckStartupConfirmationUsed = false;
+let lastUserActivityAt = Date.now();
 
 function writeUpdaterLog(level, message) {
   try {
@@ -739,6 +745,29 @@ function writeUpdaterLog(level, message) {
 function showUpdaterDialog(options) {
   const owner = win && !win.isDestroyed() ? win : null;
   return owner ? dialog.showMessageBox(owner, options) : dialog.showMessageBox(options);
+}
+
+function clearUpdateCheckRetry() {
+  if (updateCheckRetryTimer) clearTimeout(updateCheckRetryTimer);
+  updateCheckRetryTimer = null;
+}
+function scheduleUpdateCheckRetry(delayMs = null, reason = "retry") {
+  if (!app.isPackaged || !updaterInstance || appIsQuitting ||
+      process.env.PAOKRA_DISABLE_UPDATES === "1" || updateInstallPromptShown || updateCheckRetryTimer) return;
+  const delays = [10000, 30000, 90000, 180000, 300000];
+  const delay = Math.max(3000, Number(delayMs) || delays[Math.min(updateCheckRetryCount, delays.length - 1)]);
+  updateCheckRetryCount += 1;
+  writeUpdaterLog("info", "Scheduling automatic update recheck in " + Math.round(delay / 1000) + "s (" + reason + ").");
+  updateCheckRetryTimer = setTimeout(() => {
+    updateCheckRetryTimer = null;
+    if (appIsQuitting || updateInstallPromptShown) return;
+    if (updaterCheckInFlight) {
+      scheduleUpdateCheckRetry(5000, "check-still-in-flight");
+      return;
+    }
+    void runUpdateCheck(false);
+  }, delay);
+  updateCheckRetryTimer.unref?.();
 }
 
 async function runUpdateCheck(manual = false) {
@@ -786,6 +815,7 @@ async function runUpdateCheck(manual = false) {
       });
     }
     updaterManualCheckRequested = false;
+    if (!manual) scheduleUpdateCheckRetry(null, "check-error");
     return { ok: false, state: "error", dialog: Boolean(manual), error: detail.slice(0, 1000) };
   } finally {
     updaterCheckInFlight = false;
@@ -799,30 +829,50 @@ function scheduleSilentUpdateInstall(delayMs = 5000) {
     void trySilentUpdateInstall();
   }, Math.max(1000, Number(delayMs) || 5000));
 }
-function queryRuntimeIdleForUpdate() {
+function readRuntimeJsonForUpdate(route) {
   return new Promise(resolve => {
-    const request = http.get(PAOKRA_URL + "/api/state", { timeout: 1800 }, response => {
+    const request = http.get(PAOKRA_URL + route, { timeout: 1800 }, response => {
       let data = "";
       response.setEncoding("utf8");
       response.on("data", chunk => {
         data += chunk;
-        if (data.length > 256 * 1024) request.destroy(new Error("runtime state response too large"));
+        if (data.length > 256 * 1024) request.destroy(new Error("runtime response too large: " + route));
       });
       response.on("end", () => {
         try {
-          if (response.statusCode !== 200) return resolve({ ok: false, reason: "HTTP " + response.statusCode });
-          const state = JSON.parse(data);
-          if (typeof state.running !== "boolean" || typeof state.virtualcam !== "boolean") return resolve({ ok: false, reason: "incomplete runtime state" });
-          resolve({ ok: true, idle: !state.running && !state.virtualcam, running: state.running, virtualcam: state.virtualcam });
-        } catch (error) { resolve({ ok: false, reason: error?.message || "invalid runtime state" }); }
+          if (response.statusCode !== 200) return resolve({ ok: false, reason: route + " HTTP " + response.statusCode });
+          resolve({ ok: true, data: JSON.parse(data) });
+        } catch (error) { resolve({ ok: false, reason: route + ": " + (error?.message || "invalid JSON") }); }
       });
     });
-    request.on("timeout", () => request.destroy(new Error("runtime state timeout")));
-    request.on("error", error => resolve({ ok: false, reason: error?.message || "runtime not ready" }));
+    request.on("timeout", () => request.destroy(new Error(route + " timeout")));
+    request.on("error", error => resolve({ ok: false, reason: route + ": " + (error?.message || "runtime not ready") }));
   });
 }
+async function queryRuntimeIdleForUpdate() {
+  const [stateResult, flowResult, aiResult] = await Promise.all([
+    readRuntimeJsonForUpdate("/api/state"),
+    readRuntimeJsonForUpdate("/api/clip-flow"),
+    readRuntimeJsonForUpdate("/api/ai-seam/status")
+  ]);
+  const bad = [stateResult, flowResult, aiResult].find(result => !result.ok);
+  if (bad) return { ok: false, reason: bad.reason || "incomplete runtime status" };
+  const state = stateResult.data || {};
+  const flow = flowResult.data || {};
+  const ai = aiResult.data || {};
+  if (typeof state.running !== "boolean" || typeof state.virtualcam !== "boolean") {
+    return { ok: false, reason: "incomplete engine/virtual-camera status" };
+  }
+  const flowActive = Boolean(flow.runtime?.active || flow.clip_flow_active);
+  const generationBusy = Boolean(ai.generation_busy || ai.job?.status === "running");
+  const idle = !state.running && !state.virtualcam && !flowActive && !generationBusy;
+  return {
+    ok: true, idle, running: state.running, virtualcam: state.virtualcam,
+    flowActive, generationBusy
+  };
+}
 async function trySilentUpdateInstall() {
-  if (!updaterInstance || updateInstallInProgress || app.isQuitting) return;
+  if (!updaterInstance || updateInstallInProgress || appIsQuitting) return;
   const runtime = await queryRuntimeIdleForUpdate();
   if (!runtime.ok) {
     if (!updateInstallWaitLogged) {
@@ -835,7 +885,9 @@ async function trySilentUpdateInstall() {
   if (!runtime.idle) {
     updateInstallIdleChecks = 0;
     if (!updateInstallWaitLogged) {
-      writeUpdaterLog("info", "Silent install deferred until Engine and Virtual Camera are stopped.");
+      writeUpdaterLog("info", "Silent install deferred while runtime is busy: " +
+        ["Engine=" + runtime.running, "VirtualCamera=" + runtime.virtualcam,
+         "ClipFlow=" + runtime.flowActive, "AISeamGeneration=" + runtime.generationBusy].join(", "));
       updateInstallWaitLogged = true;
     }
     scheduleSilentUpdateInstall(15000);
@@ -843,13 +895,15 @@ async function trySilentUpdateInstall() {
   }
   // Never restart PAOKRA in the middle of active UI work. Wait until the
   // main window is in the background/minimized, then recheck idle twice.
-  if (win && !win.isDestroyed() && win.isVisible() && win.isFocused() && !win.isMinimized()) {
+  const uiIdleMs = Date.now() - lastUserActivityAt;
+  if (win && !win.isDestroyed() && win.isVisible() && win.isFocused() &&
+      !win.isMinimized() && uiIdleMs < 90000) {
     updateInstallIdleChecks = 0;
     if (!updateInstallWaitLogged) {
-      writeUpdaterLog("info", "Silent install deferred while the PAOKRA window is in active use.");
+      writeUpdaterLog("info", "Silent install waiting for 90s of UI inactivity; last input was " + Math.round(uiIdleMs / 1000) + "s ago.");
       updateInstallWaitLogged = true;
     }
-    scheduleSilentUpdateInstall(15000);
+    scheduleSilentUpdateInstall(Math.max(5000, 90000 - uiIdleMs + 1000));
     return;
   }
   updateInstallIdleChecks += 1;
@@ -884,7 +938,10 @@ function setupAutoUpdater() {
       return;
     }
     updaterInstance.autoDownload = true;
-    updaterInstance.autoInstallOnAppQuit = true;
+    // Never fall back to an interactive NSIS wizard on user-initiated app exit.
+    // Installation is started explicitly with quitAndInstall(true, true) after the
+    // runtime is safe and the user has been idle.
+    updaterInstance.autoInstallOnAppQuit = false;
     updaterInstance.allowPrerelease = false;
     updaterInstance.logger = {
       info: (...args) => writeUpdaterLog("info", args.map(String).join(" ")),
@@ -894,6 +951,9 @@ function setupAutoUpdater() {
     };
     updaterInstance.on("checking-for-update", () => writeUpdaterLog("info", "Checking GitHub Releases"));
     updaterInstance.on("update-available", info => {
+      clearUpdateCheckRetry();
+      updateCheckRetryCount = 0;
+      updateCheckStartupConfirmationUsed = true;
       const version = String(info?.version || "รุ่นใหม่");
       writeUpdaterLog("info", "Update available: " + version);
       updaterManualCheckRequested = false;
@@ -907,7 +967,15 @@ function setupAutoUpdater() {
       } catch (_) {}
     });
     updaterInstance.on("update-not-available", info => {
-      writeUpdaterLog("info", "Already current: " + String(info?.version || app.getVersion()));
+      writeUpdaterLog("info", "No update reported by GitHub: " + String(info?.version || app.getVersion()));
+      clearUpdateCheckRetry();
+      updateCheckRetryCount = 0;
+      // GitHub/CDN metadata can lag right after a release. Confirm once after startup
+      // instead of requiring the user to close and reopen PAOKRA to discover it.
+      if (!updateCheckStartupConfirmationUsed) {
+        updateCheckStartupConfirmationUsed = true;
+        scheduleUpdateCheckRetry(12000, "startup-confirmation");
+      }
       if (updaterManualCheckRequested) {
         showUpdaterDialog({
           type: "info", title: "PAOKRA Studio",
@@ -922,6 +990,7 @@ function setupAutoUpdater() {
       writeUpdaterLog("info", "Download progress: " + percent + "%");
     });
     updaterInstance.on("update-downloaded", info => {
+      clearUpdateCheckRetry();
       if (updateInstallPromptShown) return;
       updateInstallPromptShown = true;
       updateInstallIdleChecks = 0;
@@ -942,7 +1011,7 @@ function setupAutoUpdater() {
       const detail = error?.message || String(error);
       if (updateInstallInProgress) updateInstallInProgress = false;
       writeUpdaterLog("error", "Updater error: " + detail);
-      if (updateInstallPromptShown && !app.isQuitting) scheduleSilentUpdateInstall(15000);
+      if (updateInstallPromptShown && !appIsQuitting) scheduleSilentUpdateInstall(15000);
       if (updaterManualCheckRequested) {
         showUpdaterDialog({
           type: "warning", title: "PAOKRA Studio — ตรวจอัปเดตไม่สำเร็จ",
@@ -953,13 +1022,18 @@ function setupAutoUpdater() {
       updaterManualCheckRequested = false;
     });
     writeUpdaterLog("info", "Auto-update ready.");
-    setTimeout(() => { void runUpdateCheck(false); }, 2500);
+    // Check immediately after the app is usable, then automatically retry transient
+    // network/API errors and do one startup confirmation if GitHub said up-to-date.
+    setTimeout(() => { void runUpdateCheck(false); }, 1200);
   } catch (error) {
     updaterInstance = null;
     writeUpdaterLog("error", "Could not initialize electron-updater: " + (error?.message || String(error)));
   }
 }
 
+ipcMain.on("update-user-activity", () => {
+  lastUserActivityAt = Date.now();
+});
 ipcMain.handle("check-for-updates", async () => {
   return await runUpdateCheck(true);
 });
@@ -1080,6 +1154,9 @@ app.whenReady().then(async () => {
 });
 
 app.on("before-quit", () => {
+  appIsQuitting = true;
+  clearUpdateCheckRetry();
+  if (updateInstallRetryTimer) { clearTimeout(updateInstallRetryTimer); updateInstallRetryTimer = null; }
   // This also runs when quitting from the app menu, not just when the last
   // BrowserWindow closes. Kill the owned backend process TREE so PyInstaller's
   // worker, virtual camera sender, and FFmpeg child cannot remain orphaned.

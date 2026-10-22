@@ -5,7 +5,7 @@ $Staging = Join-Path $Root "dist\win-unpacked"
 $Resources = Join-Path $Staging "resources"
 $AppDir = Join-Path $Resources "app"
 $Runtime = Join-Path $Resources "paokra"
-$BuildTemp = "C:\PAOKRA-build-20261020\installer-temp"
+$BuildTemp = "C:\PAOKRA-build-20261022\installer-temp"
 New-Item -ItemType Directory -Force -Path $BuildTemp | Out-Null
 # Prevent overlapping builds from moving/rewriting the same NSIS archive and installer.
 $BuildLockPath = Join-Path $BuildTemp "installer-build.lock"
@@ -37,6 +37,72 @@ if($LASTEXITCODE -ne 0){ throw "Frontend JavaScript syntax QA failed: $LASTEXITC
 $UiQaCode = $LASTEXITCODE
 if($UiQaCode -ne 0){ throw "Clip Flow timeline regression QA failed ($UiQaCode). Installer build aborted." }
 Write-Host "=== PRE-BUILD CLIP FLOW TIMELINE QA PASS ===" -ForegroundColor Green
+
+# Version 1.4.4 preflight: compile both Python runtime modules and execute the
+# directed random-playlist matrix checks before any release payload is rebuilt.
+$QaPythonPre = Join-Path $Root ".venv\Scripts\python.exe"
+if(-not (Test-Path -LiteralPath $QaPythonPre)){ throw "Pre-build QA Python is missing: $QaPythonPre" }
+Write-Host "=== PRE-BUILD v1.4.4 SOURCE + DIRECTED SEAM MATRIX QA ===" -ForegroundColor Cyan
+& $QaPythonPre -m py_compile (Join-Path $Root "app\ai_seam.py") (Join-Path $Root "app\server.py")
+if($LASTEXITCODE -ne 0){ throw "Python source compile QA failed ($LASTEXITCODE)." }
+$MatrixQaScripts = @(
+  (Join-Path $Root ".build-temp\test_clip_flow_seam_automation.py"),
+  (Join-Path $Root ".build-temp\test_random_seam_matrix_144.py"),
+  (Join-Path $Root ".build-temp\test_validate_transition_matrix_144.py")
+)
+foreach($qaScriptPath in $MatrixQaScripts){
+  if(-not (Test-Path -LiteralPath $qaScriptPath)){ throw "Required v1.4.4 QA script missing: $qaScriptPath" }
+  & $QaPythonPre $qaScriptPath
+  if($LASTEXITCODE -ne 0){ throw "Pre-build v1.4.4 QA failed: $qaScriptPath (exit $LASTEXITCODE)." }
+}
+$AiSeamSourceQa = Join-Path $Root "qa_clipflow_20261017\test_ai_seam_studio_20261022.py"
+& $QaPythonPre $AiSeamSourceQa --timeout 90 --skip-flow
+if($LASTEXITCODE -ne 0){ throw "Source AI Seam/RIFE QA failed ($LASTEXITCODE); refusing to build installer." }
+Write-Host "=== PRE-BUILD v1.4.4 SOURCE + DIRECTED SEAM MATRIX QA PASS ===" -ForegroundColor Green
+
+Write-Host "=== BUILD FROZEN PYTHON BACKEND FROM CURRENT SOURCES ===" -ForegroundColor Cyan
+$BackendPython = Join-Path $Root ".venv\Scripts\python.exe"
+$BackendPythonArgs = @()
+if(-not (Test-Path -LiteralPath $BackendPython)){
+  $BackendPython = (Get-Command py -ErrorAction Stop).Source
+  $BackendPythonArgs = @("-3")
+}
+$BackendDist = Join-Path $Root "build\server-dist-v144"
+$BackendWork = Join-Path $Root "build\server-build-v144"
+$BackendSpec = Join-Path $Root "build\server-spec-v144"
+foreach($dir in @($BackendDist,$BackendWork,$BackendSpec)){
+  Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+}
+$BackendArgs = @("-m","PyInstaller","--noconfirm","--clean","--onefile","--name","paokra-server",
+  "--distpath",$BackendDist,"--workpath",$BackendWork,"--specpath",$BackendSpec,
+  "--collect-all","pyvirtualcam","--collect-all","sounddevice","--collect-all","playwright",
+  "--collect-all","cv2","--hidden-import=playwright.sync_api","--hidden-import=sounddevice",
+  (Join-Path $Root "app\server.py"))
+# Windows PowerShell 5.1 promotes native stderr lines to ErrorRecords; PyInstaller
+# writes ordinary progress to stderr, so keep those lines in the build log without
+# treating normal progress as a terminating PowerShell exception.
+$SavedErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+if($BackendPythonArgs.Count -eq 0){
+  & $BackendPython @BackendArgs 2>&1
+}else{
+  & $BackendPython @BackendPythonArgs @BackendArgs 2>&1
+}
+$BackendCode = $LASTEXITCODE
+$ErrorActionPreference = $SavedErrorActionPreference
+if($BackendCode -ne 0){ throw "PyInstaller backend build failed ($BackendCode). Refusing to package a stale paokra-server.exe." }
+$BackendCandidate = Join-Path $BackendDist "paokra-server.exe"
+$BackendRuntime = Join-Path $Root "build\runtime\paokra-server.exe"
+if(-not (Test-Path -LiteralPath $BackendCandidate)){ throw "Fresh backend executable not found: $BackendCandidate" }
+if((Get-Item -LiteralPath $BackendCandidate).Length -lt 20MB){ throw "Fresh backend executable is unexpectedly small; refusing to package it." }
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $BackendRuntime) | Out-Null
+Copy-Item -LiteralPath $BackendCandidate -Destination $BackendRuntime -Force
+$BackendBuiltHash = (Get-FileHash -LiteralPath $BackendCandidate -Algorithm SHA256).Hash
+$BackendRuntimeHash = (Get-FileHash -LiteralPath $BackendRuntime -Algorithm SHA256).Hash
+if($BackendBuiltHash -ne $BackendRuntimeHash){ throw "Backend runtime copy hash mismatch." }
+Write-Host ("Fresh paokra-server.exe ready: {0:N1} MiB · SHA256 {1}" -f ((Get-Item -LiteralPath $BackendRuntime).Length/1MB),$BackendRuntimeHash) -ForegroundColor Green
+
 $Dist = Join-Path $Root "dist"
 $Old = Join-Path $Dist "old"
 New-Item -ItemType Directory -Force -Path $Dist,$Old | Out-Null
@@ -56,6 +122,10 @@ Copy-Item (Join-Path $Desktop "environment.cjs") (Join-Path $AppDir "environment
 Copy-Item (Join-Path $Desktop "package.json") (Join-Path $AppDir "package.json") -Force
 
 Copy-Item (Join-Path $Root "build\runtime\paokra-server.exe") (Join-Path $Runtime "paokra-server.exe") -Force
+$PackagedBackend = Join-Path $Runtime "paokra-server.exe"
+$PackagedBackendHash = (Get-FileHash -LiteralPath $PackagedBackend -Algorithm SHA256).Hash
+if($PackagedBackendHash -ne $BackendRuntimeHash){ throw "Packaged backend does not match the fresh v1.4.4 PyInstaller output." }
+Write-Host ("Packaged backend integrity verified · SHA256 {0}" -f $PackagedBackendHash) -ForegroundColor Green
 
 # Bundle tiktokls.exe (TikTok LIVE Studio CLI) into cli/ inside the runtime
 $CliDest = Join-Path $Runtime "cli"
@@ -76,8 +146,11 @@ $env:ComSpec = "$env:SystemRoot\System32\cmd.exe"
 Write-Host "Cookie is intentionally NOT included in installer."
 
 Push-Location $Desktop
-& $Npx electron-builder --win nsis --publish never
+$SavedErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $Npx electron-builder --win nsis --publish never 2>&1
 $code = $LASTEXITCODE
+$ErrorActionPreference = $SavedErrorActionPreference
 Pop-Location
 if($code -ne 0){ throw "NSIS build failed: $code" }
 $Target = Join-Path $Dist "PAOKRA-Studio-Setup.exe"
@@ -115,7 +188,7 @@ Write-Host "=== POST-BUILD APP QA (Playlist Stop waits for current clip EOF) ===
 $QaCode = $LASTEXITCODE
 if($QaCode -ne 0){ throw "Post-build PAOKRA app QA failed (exit $QaCode). Installer is NOT marked complete." }
 Write-Host "=== POST-BUILD APP QA PASS ===" -ForegroundColor Green
-$AiSeamQaScript = Join-Path $Root "qa_clipflow_20261017\test_ai_seam_studio_20261020.py"
+$AiSeamQaScript = Join-Path $Root "qa_clipflow_20261017\test_ai_seam_studio_20261022.py"
 if(-not (Test-Path -LiteralPath $AiSeamQaScript)){ throw "AI Seam post-build QA script missing: $AiSeamQaScript" }
 Write-Host "=== POST-BUILD AI SEAM QA (real Vulkan/CPU inference + exact A/B endpoints + packaged Clip Flow insertion) ===" -ForegroundColor Cyan
 & $QaPython @QaPythonArgs $AiSeamQaScript --app $QaApp --port 8800 --timeout 150

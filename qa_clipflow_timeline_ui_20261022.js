@@ -123,4 +123,123 @@ check("remaining-time basis matches the slider duration", () => {
   assert.ok(Math.abs((duration - position) - (67.5 - position)) < 1e-9);
 });
 
+
+const pairStart = source.indexOf("function clipFlowPathKey");
+const pairEnd = source.indexOf("async function loadClipFlowSeams", pairStart);
+assert.ok(pairStart >= 0 && pairEnd > pairStart, "could not isolate playlist pair helpers");
+const pairCore = source.slice(pairStart, pairEnd);
+const pairCtx = vm.createContext({
+  clipFlowConfig: {
+    open: "C:\\clips\\open.mp4",
+    normal: ["C:\\clips\\1mp4.mp4", "C:\\clips\\2mp4.mp4", "C:\\clips\\3.mp4", "c:/clips/1mp4.mp4"],
+    stop: "C:\\clips\\stop.mp4"
+  },
+  clipFlowSeamCache: [],
+  String, Set, Array, Number
+});
+vm.runInContext(pairCore, pairCtx, { filename: "clipflow-pair-helpers.js" });
+check("Auto Make covers all reachable directed Playlist edges, not only Normal", () => {
+  const pairs = vm.runInContext("clipFlowPlayablePairs()", pairCtx);
+  const key = (p) => String(p).replace(/\//g, "\\").toLowerCase();
+  const keys = pairs.map(p => key(p.from) + " -> " + key(p.to));
+  assert.equal(pairs.length, 13, "3 Normal clips + Open + Stop should produce 13 distinct reachable directed edges");
+  assert.ok(keys.includes(key("C:\\clips\\open.mp4") + " -> " + key("C:\\clips\\1mp4.mp4")));
+  assert.ok(keys.includes(key("C:\\clips\\open.mp4") + " -> " + key("C:\\clips\\stop.mp4")));
+  assert.ok(keys.includes(key("C:\\clips\\1mp4.mp4") + " -> " + key("C:\\clips\\3.mp4")));
+  assert.ok(keys.includes(key("C:\\clips\\3.mp4") + " -> " + key("C:\\clips\\1mp4.mp4")));
+  assert.ok(keys.includes(key("C:\\clips\\3.mp4") + " -> " + key("C:\\clips\\stop.mp4")));
+  assert.ok(!keys.includes(key("C:\\clips\\stop.mp4") + " -> " + key("C:\\clips\\1mp4.mp4")), "Stop is terminal, so no outgoing Playlist edge");
+  assert.equal(new Set(keys).size, 13, "case/slash-duplicate paths must not create duplicate pairs");
+});
+check("Auto Make requires current-output compatibility before saying ready", () => {
+  const cache = [
+    { from_path: "C:\\clips\\1mp4.mp4", to_path: "C:\\clips\\2mp4.mp4", available: true },
+    { from_path: "C:\\clips\\1mp4.mp4", to_path: "C:\\clips\\2mp4.mp4", available: true, compatible: false },
+    { from_path: "C:\\clips\\1mp4.mp4", to_path: "C:\\clips\\2mp4.mp4", available: true, compatible: true }
+  ];
+  const query = 'clipFlowHasCachedSeam("C:\\\\clips\\\\1mp4.mp4","C:\\\\clips\\\\2mp4.mp4")';
+  pairCtx.clipFlowSeamCache = cache.slice(0, 1);
+  assert.equal(vm.runInContext(query, pairCtx), false);
+  pairCtx.clipFlowSeamCache = cache.slice(1, 2);
+  assert.equal(vm.runInContext(query, pairCtx), false);
+  pairCtx.clipFlowSeamCache = cache.slice(2, 3);
+  assert.equal(vm.runInContext(query, pairCtx), true);
+});
+check("Scene Builder uses a single Start/Stop toggle under the preview", () => {
+  const html = fs.readFileSync(path.join(root, "app", "web", "index.html"), "utf8");
+  const css = fs.readFileSync(path.join(root, "app", "web", "style.css"), "utf8");
+  assert.ok(html.includes('class="card-mini scene-timeline"') && html.includes('id="sceneClipPlay"'));
+  assert.ok(!html.includes('id="sceneClipStop"'), "old separate Stop button should not be in the visible UI");
+  assert.ok(source.includes('$("#sceneClipPlay")?.addEventListener("click",()=>S?.running?stopEnginePlayback():startEnginePlayback())'));
+  const flowRenderStart = source.indexOf("function renderClipFlow()");
+  const flowRenderEnd = source.indexOf('$("#clipFlowSeek")?.addEventListener("input"', flowRenderStart);
+  assert.ok(flowRenderStart >= 0 && flowRenderEnd > flowRenderStart);
+  const flowRenderBody = source.slice(flowRenderStart, flowRenderEnd);
+  assert.doesNotMatch(flowRenderBody, /sceneClipPlay|sceneClipStop/, "Clip Flow polling must not override the dedicated Start/Stop toggle");
+  assert.match(source, /sceneToggle\.disabled=!!engineActionBusy/);
+  assert.ok(css.includes(".scene-timeline{") && css.includes("align-self:center"));
+});
+check("Text and Web inspectors stay hidden until the Layers action selects them", () => {
+  const html = fs.readFileSync(path.join(root, "app", "web", "index.html"), "utf8");
+  assert.ok(html.includes('id="textInspector" hidden'));
+  assert.ok(html.includes('id="webInspector" class="card-mini" hidden'));
+  assert.ok(source.includes('sceneInspectorRequested=(id==="text"||id==="web")?id:""'));
+  assert.ok(source.includes("function renderSceneInspectorPanels()"));
+});
+check("AI Seam Preview composes source + generated bridge + destination", () => {
+  const ai = fs.readFileSync(path.join(root, "app", "ai_seam.py"), "utf8");
+  assert.ok(ai.includes("def build_sequence_preview("));
+  assert.ok(ai.includes("[a][s][b]concat=n=3:v=1:a=0[outv]"));
+  assert.ok(ai.includes('@bp.get("/seams/<seam_id>/preview")'));
+  assert.ok(source.includes('/api/ai-seam/seams/\${encodeURIComponent(b.dataset.aisPreview)}/preview'));
+});
+check("AI Seam endpoint frame and destination resume timestamp agree", () => {
+  const ai = fs.readFileSync(path.join(root, "app", "ai_seam.py"), "utf8");
+  assert.ok(ai.includes('next_frame, _ = _frame_from(Path(b["path"]), at_seconds=transition_seconds)'));
+  assert.ok(ai.includes("first_b, _ = _frame_from(p_b, at_seconds=resume)"));
+  assert.ok(server.includes('seam_next_role="stop"'));
+  assert.ok(server.includes('keep_stop_pending = bool(clip_flow_runtime.get("stop_requested")) and target_phase == "normal"'));
+});
+check("VRAM-aware scanner recommends GPU memory/queue profile without parallel pair jobs", () => {
+  const ai = fs.readFileSync(path.join(root, "app", "ai_seam.py"), "utf8");
+  assert.ok(ai.includes("def _vulkan_memory_info("));
+  assert.ok(ai.includes("vram_available_bytes"));
+  assert.ok(ai.includes("recommended_rife_jobs"));
+  assert.ok(ai.includes('"generation_batch": 1'));
+  assert.ok(ai.includes('"-j", jobs'));
+});
+check("Auto-update retries startup checks and explicitly requests silent install", () => {
+  const main = fs.readFileSync(path.join(root, "desktop", "main.cjs"), "utf8");
+  assert.ok(main.includes('scheduleUpdateCheckRetry(12000, "startup-confirmation")'));
+  assert.ok(main.includes('if (!manual) scheduleUpdateCheckRetry(null, "check-error")'));
+  assert.ok(main.includes("updaterInstance.autoInstallOnAppQuit = false"));
+  assert.ok(main.includes("updaterInstance.quitAndInstall(true, true)"));
+  assert.ok(main.includes("lastUserActivityAt"));
+  assert.ok(main.includes("flowActive"));
+  assert.ok(main.includes("generationBusy"));
+  assert.ok(main.includes('readRuntimeJsonForUpdate("/api/ai-seam/status")'));
+  assert.ok(main.includes("appIsQuitting = true"));
+});
+check("every sidebar menu target maps to one existing view", () => {
+  const html = fs.readFileSync(path.join(root, "app", "web", "index.html"), "utf8");
+  const nav = [...html.matchAll(/<a\b[^>]*data-view="([^"]+)"[^>]*>/g)].map(m => m[1]);
+  const views = [...html.matchAll(/<section\s+id="v-([^"]+)"/g)].map(m => m[1]);
+  assert.equal(nav.length, 14, "sidebar should expose the expected 14 main entries");
+  assert.equal(new Set(nav).size, nav.length, "navigation entries must not be duplicated");
+  assert.deepEqual([...new Set(nav)].sort(), [...new Set(views)].sort(), "every menu must land on an existing matching section");
+});
+check("all page DOM IDs are unique", () => {
+  const html = fs.readFileSync(path.join(root, "app", "web", "index.html"), "utf8");
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(m => m[1]);
+  const duplicates = ids.filter((id, i) => ids.indexOf(id) !== i);
+  assert.deepEqual(duplicates, [], "duplicate DOM IDs: " + duplicates.join(", "));
+});
+check("auto-update activity signal is connected end-to-end", () => {
+  const main = fs.readFileSync(path.join(root, "desktop", "main.cjs"), "utf8");
+  const preload = fs.readFileSync(path.join(root, "desktop", "preload.cjs"), "utf8");
+  assert.ok(preload.includes('updateActivity: () => ipcRenderer.send("update-user-activity")'));
+  assert.ok(main.includes('ipcMain.on("update-user-activity"'));
+  assert.ok(source.includes('["pointerdown","pointermove","keydown","input","change"]'));
+});
+
 process.stdout.write("CLIPFLOW_TIMELINE_QA=" + passed.length + " PASS\n");
