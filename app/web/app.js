@@ -510,6 +510,7 @@ async function aiSeamAnalyze(){
  finally{if(b)b.disabled=false;aiSeamRender()}
 }
 async function aiSeamGenerate(){
+ if(clipFlowAutoMaking){notify("Auto Make Frames กำลังใช้ AI Seam อยู่ รอให้ชุดนี้จบก่อนเริ่มงานแยก",false);return}
  if(!aiSeamFromId||!aiSeamToId||aiSeamFromId===aiSeamToId){notify(aiSeamText("choosePair"),false);return}
  if(AI_SEAM.status?.clip_flow_active){notify(aiSeamText("flowWarning"),false);return}
  const b=$("#aisGenerate");if(b)b.disabled=true;
@@ -2127,6 +2128,7 @@ $("#consoleSettingsClose")?.addEventListener("click",()=>{const panel=$("#consol
 $("#consoleSettingsSave")?.addEventListener("click",()=>{try{saveConsoleStartSettings()}catch(e){notify(e.message,false)}});
 async function startEnginePlayback(){
   if(engineActionBusy)return;
+  if(clipFlowAutoMaking){notify("Auto Make Frames กำลังสร้างและตรวจสอบเฟรมอยู่ รอให้จบก่อนเริ่ม Engine",false);return}
   engineActionBusy=true;render();
   try{
     if(!S)await poll();
@@ -2363,6 +2365,7 @@ let clipFlowUiIdentity="";
 let clipFlowStatusPollInFlight=false;
 let clipFlowUiAt=performance.now();
 let clipFlowSeamCache=[];
+let clipFlowSeamLoadSeq=0;
 let clipFlowAutoMaking=false;
 
 const clipBaseName=p=>String(p||"").split(/[\\/]+/).pop();
@@ -2596,16 +2599,37 @@ function clipFlowHasCachedSeam(fromPath,toPath){
   const key=clipFlowPairKey(fromPath,toPath);
   return clipFlowSeamCache.some(s=>clipFlowPairKey(s.from_path,s.to_path)===key&&s.available===true&&s.compatible===true);
 }
-async function loadClipFlowSeams(){
-  try{
-    const r=await api("/api/ai-seam/seams");
-    if(Array.isArray(r.seams)){clipFlowSeamCache=r.seams;renderClipFlowSeams()}
-    return r;
-  }catch(e){
-    const status=$("#clipFlowSeamStatus");
-    if(status)status.textContent="อ่านสถานะเฟรมคั่นไม่สำเร็จ: "+e.message;
-    return null;
+async function loadClipFlowSeams(options={}){
+  const requestSeq=++clipFlowSeamLoadSeq;
+  const attempts=Math.max(1,Math.min(5,Number(options.attempts)||3));
+  let lastError=null;
+  for(let attempt=0;attempt<attempts;attempt++){
+    try{
+      const r=await api("/api/ai-seam/seams");
+      // Older list requests can finish after a newer request and repaint a stale
+      // manifest, making completed generated bridges look like they disappeared.
+      if(requestSeq!==clipFlowSeamLoadSeq)return r;
+      if(Array.isArray(r.seams)){clipFlowSeamCache=r.seams;renderClipFlowSeams()}
+      return r;
+    }catch(e){
+      lastError=e;
+      if(requestSeq!==clipFlowSeamLoadSeq)return null;
+      if(attempt+1<attempts)await new Promise(resolve=>setTimeout(resolve,180*(attempt+1)));
+    }
   }
+  if(requestSeq===clipFlowSeamLoadSeq){
+    const status=$("#clipFlowSeamStatus");
+    if(status)status.textContent="อ่านสถานะเฟรมคั่นไม่สำเร็จ: "+String(lastError?.message||lastError||"unknown error");
+  }
+  return null;
+}
+async function waitForClipFlowSeam(fromPath,toPath){
+  for(let attempt=0;attempt<5;attempt++){
+    const result=await loadClipFlowSeams({attempts:2});
+    if(result&&clipFlowHasCachedSeam(fromPath,toPath))return true;
+    if(attempt<4)await new Promise(resolve=>setTimeout(resolve,250*(attempt+1)));
+  }
+  return false;
 }
 function renderClipFlowSeams(){
   const list=$("#clipFlowSeamList"),status=$("#clipFlowSeamStatus"),button=$("#clipFlowAutoMake");
@@ -2640,6 +2664,7 @@ async function clipFlowAutoMakeFrames(){
   clipFlowAutoMaking=true;renderClipFlowSeams();
   const button=$("#clipFlowAutoMake"),status=$("#clipFlowSeamStatus");
   const setStatus=m=>{if(status)status.textContent=String(m||"")};
+  let batchToken="",lastBatchHeartbeat=Date.now();
   try{
     const flow=await api("/api/clip-flow");
     clipFlowConfig={enabled:flow.config?.enabled!==false,open:String(flow.config?.open||""),normal:Array.isArray(flow.config?.normal)?flow.config.normal:[],stop:String(flow.config?.stop||"")};
@@ -2649,10 +2674,14 @@ async function clipFlowAutoMakeFrames(){
     if(allPairs.length>250){const ok=confirm("ต้องสร้างเฟรมคั่น "+allPairs.length+" คู่แบบมีทิศทาง งานอาจใช้เวลานาน แต่จะไม่ตัดคู่ที่ Playlist สามารถเล่นได้ ต้องการทำต่อหรือไม่?");if(!ok){setStatus("ยกเลิกโดยผู้ใช้ — ยังไม่ได้สร้างเฟรม");return}}
     const health=await api("/api/ai-seam/status");
     if(health.clip_flow_active||health.engine_running||health.virtualcam_active||health.generation_busy)throw new Error("ปิด Engine และ Virtual Camera แล้วหยุด Clip Flow ก่อน Auto Make Frames เพื่อไม่ให้กระทบ LIVE/FPS");
+    const reservation=await post("/api/ai-seam/batch-lock",{action:"acquire"});
+    batchToken=String(reservation.token||"");
+    if(!batchToken)throw new Error(reservation.error||"ไม่ได้รับสิทธิ์ล็อก Engine ระหว่าง Auto Make Frames");
+    lastBatchHeartbeat=Date.now();
     setStatus("กำลังซิงก์ Open / Normal / Stop กับ AI Seam Studio…");
     const paths=[],seen=new Set();
     for(const raw of [clipFlowConfig.open,...clipFlowConfig.normal,clipFlowConfig.stop]){const p=String(raw||"").trim(),k=clipFlowPathKey(p);if(p&&k&&!seen.has(k)){seen.add(k);paths.push(p)}}
-    const synced=await post("/api/ai-seam/clips",{paths});
+    const synced=await post("/api/ai-seam/clips",{paths,batch_token:batchToken});
     if(synced.errors?.length)throw new Error("ซิงก์คลิปไม่ครบ: "+synced.errors.slice(0,3).map(x=>(x.path||"")+" "+(x.error||"")).join("; "));
     const results=await Promise.all([api("/api/ai-seam/clips"),api("/api/ai-seam/seams"),api("/api/ai-seam/status")]);
     const clipsResult=results[0],seamsResult=results[1],statusResult=results[2];
@@ -2666,7 +2695,7 @@ async function clipFlowAutoMakeFrames(){
     const todo=mappedPairs.filter(p=>!clipFlowHasCachedSeam(p.from,p.to));
     renderClipFlowSeams();
     if(!todo.length){
-      if(statusResult.settings?.enabled!==true){const enabled=await post("/api/ai-seam/settings",{enabled:true});if(!enabled.ok||enabled.settings?.enabled!==true)throw new Error(enabled.error||"เปิด AI Seam ไม่สำเร็จ")}
+      if(statusResult.settings?.enabled!==true){const enabled=await post("/api/ai-seam/settings",{enabled:true,batch_token:batchToken});if(!enabled.ok||enabled.settings?.enabled!==true)throw new Error(enabled.error||"เปิด AI Seam ไม่สำเร็จ")}
       setStatus("เฟรมคั่นครบแล้ว "+mappedPairs.length+"/"+mappedPairs.length+" คู่ที่ Playlist ใช้งานได้จริง — Open/Normal/Stop ครอบคลุมครบ");
       notify("AI Seam: เฟรมคั่นครบทุกเส้นทางของ Playlist แล้ว");return;
     }
@@ -2674,14 +2703,26 @@ async function clipFlowAutoMakeFrames(){
     for(let i=0;i<todo.length;i++){
       const pair=todo[i],edge=pair.fromRole==="open"&&pair.toRole==="stop"?"OPEN → STOP":pair.fromRole==="open"?"OPEN → NORMAL":pair.toRole==="stop"?"NORMAL → STOP":"NORMAL → NORMAL";
       setStatus("กำลังสร้าง "+(i+1)+"/"+todo.length+": "+edge+" · "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+" · กำลังส่งงาน…");
-      const started=await post("/api/ai-seam/generate",{from_id:pair.fromClip.id,to_id:pair.toClip.id,force:true,compute:statusResult.settings?.compute||"auto"});
+      const started=await post("/api/ai-seam/generate",{from_id:pair.fromClip.id,to_id:pair.toClip.id,force:true,compute:statusResult.settings?.compute||"auto",batch_token:batchToken});
       const jobId=started.job?.id;
       if(!jobId)throw new Error(started.error||("เริ่มสร้าง "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+" ไม่สำเร็จ"));
-      let complete=false,lastMessage="";
+      let complete=false,lastMessage="",pollFailures=0;
       const deadline=Date.now()+60*60*1000;
       while(Date.now()<deadline){
         await new Promise(resolve=>setTimeout(resolve,900));
-        const current=await api("/api/ai-seam/jobs/"+encodeURIComponent(jobId)),job=current.job||{};
+        if(batchToken&&Date.now()-lastBatchHeartbeat>=10000){
+          await post("/api/ai-seam/batch-lock",{action:"heartbeat",token:batchToken});
+          lastBatchHeartbeat=Date.now();
+        }
+        let current;
+        try{current=await api("/api/ai-seam/jobs/"+encodeURIComponent(jobId));pollFailures=0}
+        catch(pollError){
+          pollFailures++;
+          if(pollFailures>=5)throw new Error("อ่านสถานะงานสร้างเฟรมไม่ได้ต่อเนื่อง 5 ครั้ง: "+pollError.message);
+          setStatus("กำลังสร้าง "+(i+1)+"/"+todo.length+": "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+" · เชื่อมต่อ log อีกครั้ง ("+pollFailures+"/5)");
+          continue;
+        }
+        const job=current.job||{};
         const progress=Math.max(0,Math.min(100,Number(job.progress)||0));
         const message=String(job.message||job.phase||"กำลังประมวลผล");
         if(message!==lastMessage){lastMessage=message;setStatus("กำลังสร้าง "+(i+1)+"/"+todo.length+": "+edge+" · "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+" · "+progress+"% · "+message)}
@@ -2689,12 +2730,12 @@ async function clipFlowAutoMakeFrames(){
         if(job.status==="error")throw new Error(clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+": "+(job.error||job.message||"สร้างเฟรมไม่สำเร็จ"));
       }
       if(!complete)throw new Error("หมดเวลารอเฟรม "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+" (60 นาที)");
-      await loadClipFlowSeams();
-      if(!clipFlowHasCachedSeam(pair.from,pair.to))throw new Error("งานสร้างเสร็จแต่ cache ไม่เข้ากับ Output/Settings ปัจจุบัน: "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to));
+      if(!await waitForClipFlowSeam(pair.from,pair.to))throw new Error("งานสร้างเสร็จแล้ว แต่ตรวจ cache ที่ยืนยันได้ไม่พบหลังลองอ่านซ้ำ 5 รอบ: "+clipBaseName(pair.from)+" → "+clipBaseName(pair.to)+" — กรุณาดู AI Seam Jobs/Logs ก่อนลองซ้ำ");
     }
+    await loadClipFlowSeams({attempts:4});
     const finalPairs=clipFlowPlayablePairs(clipFlowConfig),finalReady=finalPairs.filter(p=>clipFlowHasCachedSeam(p.from,p.to)).length;
     if(finalReady!==finalPairs.length)throw new Error("ตรวจยืนยันเฟรมคั่นไม่ครบ: "+finalReady+"/"+finalPairs.length+" คู่");
-    if(statusResult.settings?.enabled!==true){const enabled=await post("/api/ai-seam/settings",{enabled:true});if(!enabled.ok||enabled.settings?.enabled!==true)throw new Error(enabled.error||"สร้างเฟรมครบแล้วแต่เปิดใช้ AI Seam ไม่สำเร็จ")}
+    if(statusResult.settings?.enabled!==true){const enabled=await post("/api/ai-seam/settings",{enabled:true,batch_token:batchToken});if(!enabled.ok||enabled.settings?.enabled!==true)throw new Error(enabled.error||"สร้างเฟรมครบแล้วแต่เปิดใช้ AI Seam ไม่สำเร็จ")}
     await aiSeamLoad(true);
     setStatus("เสร็จแล้ว: เฟรมคั่นพร้อมใช้ "+finalReady+"/"+finalPairs.length+" คู่ · Open → Normal/Stop, Normal ↔ Normal และ Normal → Stop ครบ");
     notify("Auto Make Frames เสร็จแล้ว "+finalReady+"/"+finalPairs.length+" คู่ที่ Playlist เล่นได้จริง");
@@ -2703,6 +2744,11 @@ async function clipFlowAutoMakeFrames(){
     clipFlowMessage("Auto Make Frames ไม่สำเร็จ: "+e.message,true);
     notify(e.message,false);
   }finally{
+    if(batchToken){
+      try{await post("/api/ai-seam/batch-lock",{action:"release",token:batchToken})}
+      catch(releaseError){console.warn("Could not release Auto Make Frames reservation; the server lease will expire safely.",releaseError)}
+      batchToken="";
+    }
     clipFlowAutoMaking=false;
     if(button)button.disabled=false;
     renderClipFlowSeams();

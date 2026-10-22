@@ -260,6 +260,55 @@ clip_flow_done_event = threading.Event()
 clip_flow_controller_thread = None
 # Serializes source handoff with manual Start/Stop actions to prevent stale source switches.
 clip_flow_transition_lock = threading.RLock()
+# A reservation spans the entire Auto Make Frames batch, including gaps between
+# individual RIFE jobs. The short lease prevents a crashed/closed UI from
+# locking Engine controls forever; the UI renews it while the batch is active.
+AI_SEAM_BATCH_LEASE_SECONDS = 120.0
+ai_seam_batch_guard_lock = threading.RLock()
+ai_seam_batch_guard = {"token": "", "lease_until": 0.0, "started_at": 0.0}
+
+
+def _ai_seam_batch_is_active():
+    now = time.monotonic()
+    with ai_seam_batch_guard_lock:
+        token = str(ai_seam_batch_guard.get("token") or "")
+        if token and now >= float(ai_seam_batch_guard.get("lease_until") or 0.0):
+            ai_seam_batch_guard.update(token="", lease_until=0.0, started_at=0.0)
+            token = ""
+        return bool(token)
+
+
+@app.before_request
+def _protect_ai_seam_batch_mutations():
+    """Prevent mid-batch edits/cache clearing; allow only token-owned batch calls."""
+    if not _ai_seam_batch_is_active():
+        return None
+    path, method = request.path, request.method.upper()
+    if path == "/api/ai-seam/batch-lock":
+        return None
+    if method in ("GET", "HEAD", "OPTIONS"):
+        return None
+    if path == "/api/settings" or path == "/api/clip-flow/config" or path == "/api/source":
+        return jsonify(ok=False, error="Auto Make Frames is active; Scene/Output/Source changes are temporarily locked until frame verification completes."), 409
+    if path.startswith("/api/ai-seam/"):
+        body = request.get_json(silent=True)
+        body = body if isinstance(body, dict) else {}
+        supplied_token = str(body.get("batch_token") or "")
+        with ai_seam_batch_guard_lock:
+            active_token = str(ai_seam_batch_guard.get("token") or "")
+        owns_batch = bool(active_token and supplied_token == active_token)
+        if owns_batch and path == "/api/ai-seam/clips" and method == "POST":
+            return None
+        if owns_batch and path == "/api/ai-seam/generate" and method == "POST":
+            return None
+        if (owns_batch and path == "/api/ai-seam/settings" and method == "POST"
+                and body.get("enabled") is True
+                and set(body).issubset({"enabled", "batch_token"})):
+            return None
+        return jsonify(ok=False, error="Auto Make Frames is verifying transitions. Wait before editing AI Seam clips/settings or clearing the cache."), 409
+    return None
+
+
 # Generation token prevents an old decoder EOF from advancing the next clip.
 clip_flow_eof_generation = None
 
@@ -3106,6 +3155,8 @@ def _clip_flow_begin_open(reason="manual"):
 
 def _clip_flow_begin_open_impl(reason="manual"):
     global clip_flow_eof_generation, clip_flow_restore_loop
+    if _ai_seam_batch_is_active():
+        return {"ok": False, "error": "Auto Make Frames is running. Wait for the transition batch to finish before starting Clip Flow."}
     if _ai_seam_generation_active(DATA):
         return {"ok": False, "error": "AI Seam generation is using compute resources. Wait for it to finish before starting Clip Flow."}
     config = _clip_config_snapshot()
@@ -3394,6 +3445,8 @@ def clip_flow_get():
 
 @app.post("/api/clip-flow/config")
 def clip_flow_save_config():
+    if _ai_seam_batch_is_active():
+        return jsonify(ok=False, error="Auto Make Frames กำลังทำงานอยู่ จึงล็อกการแก้ Playlist ชั่วคราวเพื่อให้ตรวจเฟรมได้ครบ"), 409
     body = request.get_json(silent=True)
     if body is None:
         body = {}
@@ -3431,13 +3484,19 @@ def clip_flow_save_config():
                 return jsonify(ok=False, error=f"ไม่พบไฟล์ Normal: {item}"), 400
     except Exception as exc:
         return jsonify(ok=False, error=str(exc)[:400]), 400
-    with clip_flow_lock:
-        clip_flow_config.clear()
-        clip_flow_config.update(current)
-    try:
-        _persist_clip_config(current)
-    except Exception as exc:
-        return jsonify(ok=False, error=f"บันทึก Clip Flow ไม่สำเร็จ: {exc}"), 500
+    # Commit under the same transition lock used by batch acquisition. The
+    # first check above gives fast feedback; this second check closes the race
+    # where a playlist edit began before Auto Make acquired its reservation.
+    with clip_flow_transition_lock:
+        if _ai_seam_batch_is_active():
+            return jsonify(ok=False, error="Auto Make Frames เริ่มทำงานระหว่างแก้ Playlist — ไม่มีการบันทึกการเปลี่ยนแปลง"), 409
+        with clip_flow_lock:
+            clip_flow_config.clear()
+            clip_flow_config.update(current)
+        try:
+            _persist_clip_config(current)
+        except Exception as exc:
+            return jsonify(ok=False, error=f"บันทึก Clip Flow ไม่สำเร็จ: {exc}"), 500
     return jsonify(**_clip_flow_public_state())
 
 
@@ -3445,6 +3504,57 @@ def clip_flow_save_config():
 def clip_flow_start():
     result = _clip_flow_begin_open(reason="settings_start")
     return (jsonify(**result), 200 if result.get("ok") else 400)
+
+
+@app.post("/api/ai-seam/batch-lock")
+def ai_seam_batch_lock_route():
+    """Reserve Engine/source controls for the whole Auto Make Frames batch."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(ok=False, error="batch-lock payload must be an object"), 400
+    action = str(body.get("action") or "").strip().lower()
+    if action not in ("acquire", "heartbeat", "release"):
+        return jsonify(ok=False, error="action must be acquire, heartbeat or release"), 400
+
+    if action == "acquire":
+        # Use the same transition lock as Engine and Clip Flow starts so two
+        # operations cannot pass their preflight checks at the same time.
+        with clip_flow_transition_lock:
+            with lock:
+                engine_running = bool(state.get("running", False))
+                camera_running = bool(state.get("virtualcam", False) or vcam.active)
+            with clip_flow_lock:
+                flow_running = bool(clip_flow_runtime.get("active"))
+            if engine_running or camera_running or flow_running:
+                return jsonify(ok=False, error="Stop Engine, Virtual Camera and Clip Flow before Auto Make Frames."), 409
+            if _ai_seam_generation_active(DATA):
+                return jsonify(ok=False, error="An AI Seam generation job is already running."), 409
+            now = time.monotonic()
+            with ai_seam_batch_guard_lock:
+                active_token = str(ai_seam_batch_guard.get("token") or "")
+                if active_token and now < float(ai_seam_batch_guard.get("lease_until") or 0.0):
+                    return jsonify(ok=False, error="Another Auto Make Frames batch already owns the Engine reservation."), 409
+                token = uuid.uuid4().hex
+                ai_seam_batch_guard.update(
+                    token=token, lease_until=now + AI_SEAM_BATCH_LEASE_SECONDS,
+                    started_at=now,
+                )
+            return jsonify(ok=True, token=token, lease_seconds=AI_SEAM_BATCH_LEASE_SECONDS)
+
+    token = str(body.get("token") or "")
+    now = time.monotonic()
+    with ai_seam_batch_guard_lock:
+        owned_token = str(ai_seam_batch_guard.get("token") or "")
+        lease_until = float(ai_seam_batch_guard.get("lease_until") or 0.0)
+        if not token or token != owned_token or now >= lease_until:
+            if owned_token and now >= lease_until:
+                ai_seam_batch_guard.update(token="", lease_until=0.0, started_at=0.0)
+            return jsonify(ok=False, error="Auto Make Frames reservation expired; stop and retry the batch."), 409
+        if action == "heartbeat":
+            ai_seam_batch_guard["lease_until"] = now + AI_SEAM_BATCH_LEASE_SECONDS
+            return jsonify(ok=True, lease_seconds=AI_SEAM_BATCH_LEASE_SECONDS)
+        ai_seam_batch_guard.update(token="", lease_until=0.0, started_at=0.0)
+        return jsonify(ok=True, released=True)
 
 
 @app.post("/api/source/seek")
@@ -3461,6 +3571,10 @@ def source_seek():
         return jsonify(ok=False, error=f"เวลา seek ไม่ถูกต้อง: {str(exc)[:120]}"), 400
 
     with clip_flow_transition_lock:
+        if _ai_seam_batch_is_active():
+            return jsonify(ok=False, error="Auto Make Frames กำลังทำงานอยู่ กรุณารอให้สร้างเสร็จก่อนเลื่อนเวลาใน Scene Builder"), 409
+        if _ai_seam_generation_active(DATA):
+            return jsonify(ok=False, error="AI Seam กำลังสร้างเฟรมอยู่ กรุณารอให้เสร็จก่อนเลื่อนเวลาใน Scene Builder"), 409
         with clip_flow_lock:
             if bool(clip_flow_runtime.get("active")):
                 return jsonify(ok=False, error="Clip Flow กำลังควบคุมคลิปอยู่ กรุณาใช้ Timeline ของ Flow"), 409
@@ -3507,6 +3621,10 @@ def clip_flow_seek():
     except (TypeError, ValueError, OverflowError) as exc:
         return jsonify(ok=False, error=f"เวลา seek ไม่ถูกต้อง: {str(exc)[:120]}"), 400
     with clip_flow_transition_lock:
+        if _ai_seam_batch_is_active():
+            return jsonify(ok=False, error="Auto Make Frames กำลังทำงานอยู่ กรุณารอให้สร้างเสร็จก่อนเลื่อนเวลา"), 409
+        if _ai_seam_generation_active(DATA):
+            return jsonify(ok=False, error="AI Seam กำลังสร้างเฟรมอยู่ กรุณารอให้เสร็จก่อนเลื่อนเวลา"), 409
         with clip_flow_lock:
             active = bool(clip_flow_runtime.get("active"))
             phase = str(clip_flow_runtime.get("phase") or "")
@@ -3561,6 +3679,8 @@ def _api_source_locked():
         src = str(DATA / Path(src.removeprefix("/media/")).name)
     if not src:
         return jsonify(ok=False, error="source required"), 400
+    if _ai_seam_batch_is_active() or _ai_seam_generation_active(DATA):
+        return jsonify(ok=False, error="AI Seam is generating or verifying transition frames; wait before changing the active Source."), 409
     # Fail fast if Clip Flow already owns the active source; recheck under the
     # transition lock before commit to cover a Flow that starts mid-download.
     with clip_flow_lock:
@@ -3608,6 +3728,10 @@ def _api_source_locked():
         return jsonify(error="source not found"), 404
 
     with clip_flow_transition_lock:
+        if _ai_seam_batch_is_active() or _ai_seam_generation_active(DATA):
+            if downloaded_target is not None:
+                downloaded_target.unlink(missing_ok=True)
+            return jsonify(ok=False, error="AI Seam กำลังสร้าง/ตรวจเฟรม จึงยังไม่ได้เปลี่ยน Source"), 409
         with clip_flow_lock:
             if clip_flow_runtime.get("active"):
                 if downloaded_target is not None:
@@ -3640,6 +3764,8 @@ def upload_media():
     activate_raw = str(request.form.get("activate_source", "true") or "true").strip().lower()
     activate_source = activate_raw not in {"0", "false", "no", "off"}
     if activate_source:
+        if _ai_seam_batch_is_active() or _ai_seam_generation_active(DATA):
+            return jsonify(ok=False, error="AI Seam is generating or verifying transition frames; wait before activating an uploaded Source."), 409
         with clip_flow_lock:
             if clip_flow_runtime.get("active"):
                 return jsonify(ok=False, error="Clip Flow กำลังทำงานอยู่ กรุณาหยุด Flow ก่อนเปลี่ยน Source"), 409
@@ -3691,6 +3817,10 @@ def upload_media():
                        name=safe_name, url="/media/" + target.name, layer_order=order)
 
     with clip_flow_transition_lock:
+        if _ai_seam_batch_is_active() or _ai_seam_generation_active(DATA):
+            return jsonify(ok=False, uploaded=True,
+                           error="อัปโหลดไฟล์แล้ว แต่ AI Seam กำลังสร้าง/ตรวจเฟรม จึงยังไม่ได้เปลี่ยน Source",
+                           source=str(target), name=safe_name, url="/media/" + target.name), 409
         with clip_flow_lock:
             if clip_flow_runtime.get("active"):
                 # The upload is complete and remains available in the Media library;
@@ -3881,6 +4011,8 @@ def settings():
         body = {}
     if not isinstance(body, dict):
         return jsonify(ok=False, error="settings payload must be an object"), 400
+    if _ai_seam_batch_is_active():
+        return jsonify(ok=False, error="Auto Make Frames กำลังตรวจเฟรมคั่นอยู่ จึงล็อกการเปลี่ยน Scene/Output Settings ชั่วคราว"), 409
 
     # Reject malformed numeric settings before mutating global render state.
     # A bad UI/API value must not surface as HTTP 500 or poison the render loop.
@@ -4009,6 +4141,8 @@ def settings():
                "loop_variation_enabled","loop_variation_strength","source_fit_mode","source_flip_h","source_flip_v",
                "cpu_threads","decode_backend","render_backend","video_fx")
     with clip_flow_transition_lock:
+        if _ai_seam_batch_is_active():
+            return jsonify(ok=False, error="Auto Make Frames เริ่มทำงานระหว่างแก้ Scene/Output — ไม่มีการเปลี่ยนค่าที่กำลังใช้สร้างเฟรม"), 409
         with lock:
             if state.get("virtualcam") and ("width" in body or "height" in body or "fps" in body or "fps_mode" in body):
                 return jsonify(ok=False, error="หยุด Virtual Camera ก่อนเปลี่ยน Output Resolution/FPS"), 409
@@ -5461,6 +5595,8 @@ def virtualcam_control():
     action = body.get("action")
     if action not in ("start", "stop", "reconfigure-stop"):
         return jsonify(error="unknown action"), 400
+    if action == "start" and _ai_seam_batch_is_active():
+        return jsonify(ok=False, active=bool(vcam.active), error="Auto Make Frames is running; wait before starting the Virtual Camera."), 409
     if action == "start" and _ai_seam_generation_active(DATA):
         return jsonify(ok=False, active=bool(vcam.active), error="AI Seam generation is running; wait for it to finish before starting the Virtual Camera."), 409
 
@@ -5469,6 +5605,8 @@ def virtualcam_control():
     # Device teardown can block briefly; holding the lock here used to stall state
     # polling and made Engine/Virtual Camera buttons appear frozen.
     with clip_flow_transition_lock:
+        if action == "start" and _ai_seam_batch_is_active():
+            return jsonify(ok=False, active=bool(vcam.active), error="Auto Make Frames is running; wait before starting the Virtual Camera."), 409
         if action == "start" and _ai_seam_generation_active(DATA):
             return jsonify(ok=False, active=bool(vcam.active), error="AI Seam compute is running; wait before starting the Virtual Camera."), 409
         if action == "start":
@@ -5539,9 +5677,13 @@ def control():
         return jsonify(ok=False, error="control payload must be an object"), 400
     action = body.get("action")
     if action == "start":
+        if _ai_seam_batch_is_active():
+            return jsonify(ok=False, error="Auto Make Frames is running; wait for the verified transition batch to finish before starting the Engine."), 409
         if _ai_seam_generation_active(DATA):
             return jsonify(ok=False, error="AI Seam generation is running; wait for it to finish before starting the Engine."), 409
         with clip_flow_transition_lock:
+            if _ai_seam_batch_is_active():
+                return jsonify(ok=False, error="Auto Make Frames is running; wait before starting the Engine."), 409
             if _ai_seam_generation_active(DATA):
                 return jsonify(ok=False, error="AI Seam compute is running; wait before starting the Engine."), 409
             cfg = _clip_config_snapshot()
@@ -5567,9 +5709,10 @@ def control():
                 source_start_offset = 0.0
                 source_playback_origin = time.monotonic() + MEDIA_START_LEAD_SEC
                 source_sequence_index = 0
-            with source_frame_lock:
-                source_prepared_frame = None
-                source_prepared_serial += 1
+            # Keep the last valid preview/compositor frame as a hold frame while
+            # the decoder warms the first playback buffer. Clearing it here made
+            # Engine Start emit a black interval until the first prepared frame
+            # arrived, especially after a Scene Builder seek on CPU-bound PCs.
             with lock:
                 state["running"] = True
                 state["loop_count"] = 0

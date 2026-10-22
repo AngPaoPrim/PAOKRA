@@ -22,6 +22,40 @@ check("clipFlowStatusPollInFlight is declared before the status-poll interval", 
 });
 const server = fs.readFileSync(path.join(root, "app", "server.py"), "utf8");
 
+check("v1.4.5 batch reservation protects Engine/seek/source/settings across pair gaps", () => {
+  assert.ok(server.includes("AI_SEAM_BATCH_LEASE_SECONDS = 120.0"));
+  assert.ok(server.includes('@app.post("/api/ai-seam/batch-lock")'));
+  assert.ok(server.includes("def _ai_seam_batch_is_active():"));
+  assert.ok(server.includes("def _protect_ai_seam_batch_mutations():"));
+  assert.ok(server.includes("wait for the verified transition batch to finish before starting the Engine"));
+  assert.ok(server.includes("Auto Make Frames is active; Scene/Output/Source changes are temporarily locked"));
+  assert.ok(source.includes('post("/api/ai-seam/batch-lock",{action:"acquire"})'));
+  assert.ok(source.includes('action:"heartbeat",token:batchToken'));
+  assert.ok(source.includes('action:"release",token:batchToken'));
+  assert.ok(source.includes("batch_token:batchToken"));
+});
+check("Auto Make verifies saved bridges after retrying reads and blocks overlapping manual generation", () => {
+  assert.ok(source.includes("let clipFlowSeamLoadSeq=0"));
+  assert.ok(source.includes("if(requestSeq!==clipFlowSeamLoadSeq)return r"));
+  assert.ok(source.includes("async function waitForClipFlowSeam(fromPath,toPath)"));
+  assert.ok(source.includes("await waitForClipFlowSeam(pair.from,pair.to)"));
+  assert.ok(source.includes("Auto Make Frames กำลังใช้ AI Seam อยู่"));
+});
+check("AI Seam reports complete only after compute lock is released", () => {
+  const ai = fs.readFileSync(path.join(root, "app", "ai_seam.py"), "utf8");
+  assert.ok(ai.includes('status="finalizing", phase="finalizing"'));
+  assert.ok(ai.includes('self.generation_lock.release()'));
+  assert.ok(ai.includes('job.update(status="complete"'));
+  assert.ok(ai.indexOf('self.generation_lock.release()') < ai.indexOf('job.update(status="complete"'));
+});
+check("Engine start retains the last valid frame while decoder pre-roll fills", () => {
+  const controlStart = server.indexOf('if action == "start":', server.indexOf('@app.post("/api/control")'));
+  const controlStop = server.indexOf('if action == "stop":', controlStart);
+  assert.ok(controlStart >= 0 && controlStop > controlStart);
+  const body = server.slice(controlStart, controlStop);
+  assert.ok(body.includes("Keep the last valid preview/compositor frame as a hold frame"));
+  assert.ok(!body.includes("source_prepared_frame = None; source_prepared_serial += 1"));
+});
 check("Normal queue remains randomized per cycle, not source-list order", () => {
   const a = server.indexOf("def _clip_flow_shuffle_next_locked():");
   const b = server.indexOf("def _ensure_clip_flow_controller()", a);

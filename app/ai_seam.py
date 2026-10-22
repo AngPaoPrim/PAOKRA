@@ -1236,8 +1236,12 @@ class AiSeamService:
                     # Keep any file Windows still has open; it is no longer a
                     # playback entry and can be removed by an explicit Clear Cache.
                     pass
-            self._job_update(job_id, status="complete", phase="complete", progress=100,
-                             message="Transition generated and verified", error=None, result=record,
+            # Do not expose `complete` until the worker releases generation_lock.
+            # Auto Make Frames can immediately queue the next directed pair after
+            # seeing that status; publishing it first created an intermittent 409
+            # race where the previous frame was saved but the next pair failed.
+            self._job_update(job_id, status="finalizing", phase="finalizing", progress=100,
+                             message="Transition verified; releasing compute lock", error=None, result=record,
                              compute_used=actual_compute, inference_seconds=round(elapsed_rife, 3),
                              similarity=similarity)
         except Exception as exc:
@@ -1254,6 +1258,14 @@ class AiSeamService:
         finally:
             shutil.rmtree(job_dir, ignore_errors=True)
             self.generation_lock.release()
+            # `complete` is the public synchronization point: once the browser
+            # observes it, the next pair can safely acquire generation_lock.
+            with self.lock:
+                job = self.jobs.get(job_id)
+                if job and job.get("status") == "finalizing":
+                    job.update(status="complete", phase="complete",
+                               message="Transition generated and verified",
+                               updated_at=time.time())
 
     def find_transition(self, from_path: str | Path, to_path: str | Path,
                         runtime_profile: dict[str, Any] | None = None) -> dict[str, Any] | None:
