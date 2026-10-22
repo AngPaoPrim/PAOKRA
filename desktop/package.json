@@ -30,7 +30,8 @@
       "main.cjs",
       "preload.cjs",
       "environment.cjs",
-      "package.json"
+      "package.json",
+      "system-update.html"
     ],
     "extraResources": [
       {

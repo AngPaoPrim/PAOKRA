@@ -269,7 +269,7 @@ async function startFlask() {
       const targetLiteral = "'" + String(targetBackend).replace(/'/g, "''") + "'";
       const match = app.isPackaged
         ? "($_.Name -eq 'paokra-server.exe' -and [string]::Equals($_.ExecutablePath, $target, [StringComparison]::OrdinalIgnoreCase))"
-        : "($_.Name -match '^(python|pythonw|py)(\\.exe)?$' -and $_.CommandLine -and $_.CommandLine.ToLowerInvariant().Contains($target.ToLowerInvariant()))";
+        : "($_.Name -match '^(python|pythonw|py)(\.exe)?$' -and $_.CommandLine -and $_.CommandLine.ToLowerInvariant().Contains($target.ToLowerInvariant()))";
       const cleanup = "$target = " + targetLiteral + "; Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { " + match + " } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }";
       execFileSync("powershell", ["-NoProfile", "-Command", cleanup], {
         windowsHide: true, stdio: "ignore", timeout: 10000
@@ -872,7 +872,7 @@ async function queryRuntimeIdleForUpdate() {
   };
 }
 async function trySilentUpdateInstall() {
-  if (!updaterInstance || updateInstallInProgress || appIsQuitting) return;
+  if (!updaterInstance || updateInstallInProgress || appIsQuitting || (systemUpdateWindow && !systemUpdateWindow.isDestroyed())) return;
   const runtime = await queryRuntimeIdleForUpdate();
   if (!runtime.ok) {
     if (!updateInstallWaitLogged) {
@@ -1031,6 +1031,16 @@ function setupAutoUpdater() {
   }
 }
 
+
+let systemUpdateWindow=null;
+function openSystemUpdateFix(){try{if(updaterInstance)updaterInstance.autoDownload=false;if(updateInstallRetryTimer){clearTimeout(updateInstallRetryTimer);updateInstallRetryTimer=null;}}catch(_){}if(systemUpdateWindow&&!systemUpdateWindow.isDestroyed()){systemUpdateWindow.show();systemUpdateWindow.focus();return;}systemUpdateWindow=new BrowserWindow({width:760,height:680,minWidth:640,minHeight:560,title:"PAOKRA Studio — System Update FIX",backgroundColor:"#0b1020",autoHideMenuBar:true,webPreferences:{nodeIntegration:true,contextIsolation:false,sandbox:false}});systemUpdateWindow.loadFile(path.join(__dirname,"system-update.html"));systemUpdateWindow.on("closed",()=>{systemUpdateWindow=null;});}
+function getGithubJson(url,redirects=0){return new Promise((resolve,reject)=>{const https=require("https");if(redirects>5)return reject(new Error("Too many redirects"));https.get(url,{headers:{"User-Agent":"PAOKRA-System-Update-FIX","Accept":"application/vnd.github+json"}},res=>{if([301,302,303,307,308].includes(res.statusCode)&&res.headers.location){res.resume();return resolve(getGithubJson(res.headers.location,redirects+1));}let b="";res.setEncoding("utf8");res.on("data",c=>{b+=c;if(b.length>4*1024*1024)res.destroy(new Error("Response too large"));});res.on("end",()=>{if(res.statusCode!==200)return reject(new Error("GitHub HTTP "+res.statusCode));try{resolve(JSON.parse(b));}catch(e){reject(e);}});}).on("error",reject);});}
+let systemUpdateBusy=false;
+function sendSystemUpdateState(x){try{if(systemUpdateWindow&&!systemUpdateWindow.isDestroyed())systemUpdateWindow.webContents.send("system-update-state",x);}catch(_){}}
+ipcMain.handle("system-update-list",async()=>{try{const rs=await getGithubJson("https://api.github.com/repos/AngPaoPrim/PAOKRA/releases?per_page=100");return{ok:true,currentVersion:app.getVersion(),releases:rs.filter(r=>!r.draft&&(r.assets||[]).some(a=>/PAOKRA-Studio-Setup\.exe$/i.test(a.name))).map(r=>{const a=r.assets.find(a=>/PAOKRA-Studio-Setup\.exe$/i.test(a.name));return{tag:r.tag_name,name:r.name||r.tag_name,publishedAt:r.published_at,prerelease:!!r.prerelease,notes:String(r.body||"").slice(0,4000),asset:a.browser_download_url,size:a.size};})};}catch(e){return{ok:false,error:String(e.message||e)};}});
+ipcMain.handle("system-update-download",async(_e,url,tag)=>{if(systemUpdateBusy)return{ok:false,error:"กำลังดาวน์โหลดอยู่"};let u;try{u=new URL(String(url));}catch(_){return{ok:false,error:"ลิงก์ไม่ถูกต้อง"};}if(u.hostname!=="github.com"&&u.hostname!=="release-assets.githubusercontent.com")return{ok:false,error:"อนุญาตเฉพาะ GitHub Releases"};systemUpdateBusy=true;const fs=require("fs"),https=require("https"),dir=path.join(app.getPath("downloads"),"PAOKRA-System-Update-FIX");fs.mkdirSync(dir,{recursive:true});const safe=String(tag||"release").replace(/[^\\w.-]/g,"_"),dest=path.join(dir,"PAOKRA-Studio-"+safe+"-Setup.exe");const get=(url,n=0)=>new Promise((resolve,reject)=>{if(n>8)return reject(Error("Redirect limit"));const req=https.get(url,{"headers":{"User-Agent":"PAOKRA-System-Update-FIX"}},res=>{if([301,302,303,307,308].includes(res.statusCode)&&res.headers.location){res.resume();return resolve(get(new URL(res.headers.location,url).toString(),n+1));}if(res.statusCode!==200){res.resume();return reject(Error("Download HTTP "+res.statusCode));}let got=0;const total=Number(res.headers["content-length"])||0,out=fs.createWriteStream(dest);res.on("data",b=>{got+=b.length;sendSystemUpdateState({phase:"download",received:got,total,percent:total?Math.round(got*100/total):null});});res.pipe(out);out.on("finish",()=>out.close(resolve));out.on("error",reject);res.on("error",reject);});req.on("error",reject);});try{await get(u.toString());sendSystemUpdateState({phase:"downloaded"});return{ok:true,file:dest};}catch(e){try{if(fs.existsSync(dest))fs.unlinkSync(dest);}catch(_){}return{ok:false,error:String(e.message||e)};}finally{systemUpdateBusy=false;}});
+ipcMain.handle("system-update-install",async(_e,file)=>{try{const fs=require("fs");const dir=path.resolve(path.join(app.getPath("downloads"),"PAOKRA-System-Update-FIX"))+path.sep;if(typeof file!=="string"||!path.resolve(file).toLowerCase().startsWith(dir.toLowerCase())||!file.toLowerCase().endsWith(".exe")||!fs.existsSync(file))return{ok:false,error:"ไม่พบไฟล์ Setup ที่ดาวน์โหลดจากเครื่องมือนี้"};const {spawn}=require("child_process");spawn(file,[],{detached:true,stdio:"ignore",windowsHide:false}).unref();sendSystemUpdateState({phase:"install"});setTimeout(()=>app.quit(),900);return{ok:true};}catch(e){return{ok:false,error:String(e.message||e)};}});
+
 ipcMain.on("update-user-activity", () => {
   lastUserActivityAt = Date.now();
 });
@@ -1043,7 +1053,8 @@ function installApplicationMenu() {
     {
       label: "Help",
       submenu: [
-        { label: "ตรวจสอบการอัปเดต…", click: () => { void runUpdateCheck(true); } },
+        { label: "System Update FIX — เลือกเวอร์ชัน", click: () => openSystemUpdateFix() },
+        { label: "ตรวจสอบการอัปเดตอัตโนมัติ…", click: () => { void runUpdateCheck(true); } },
         { type: "separator" },
         { label: "PAOKRA Studio v" + app.getVersion(), enabled: false }
       ]
