@@ -26,6 +26,17 @@ if(-not (Test-Path -LiteralPath $RoboCopy)){ throw "robocopy.exe not found: $Rob
 if(-not (Test-Path -LiteralPath $Npx)){ throw "npx.cmd not found: $Npx" }
 
 Write-Host "=== PAOKRA Windows Installer Build ==="
+$Node = Join-Path $env:ProgramFiles "nodejs\node.exe"
+$UiQaScript = Join-Path $Root "qa_clipflow_timeline_ui_20261022.js"
+if(-not (Test-Path -LiteralPath $Node)){ throw "node.exe not found: $Node" }
+if(-not (Test-Path -LiteralPath $UiQaScript)){ throw "Clip Flow timeline QA script missing: $UiQaScript" }
+Write-Host "=== PRE-BUILD CLIP FLOW TIMELINE QA ===" -ForegroundColor Cyan
+& $Node --check (Join-Path $Root "app\web\app.js")
+if($LASTEXITCODE -ne 0){ throw "Frontend JavaScript syntax QA failed: $LASTEXITCODE" }
+& $Node $UiQaScript
+$UiQaCode = $LASTEXITCODE
+if($UiQaCode -ne 0){ throw "Clip Flow timeline regression QA failed ($UiQaCode). Installer build aborted." }
+Write-Host "=== PRE-BUILD CLIP FLOW TIMELINE QA PASS ===" -ForegroundColor Green
 $Dist = Join-Path $Root "dist"
 $Old = Join-Path $Dist "old"
 New-Item -ItemType Directory -Force -Path $Dist,$Old | Out-Null

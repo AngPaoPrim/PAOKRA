@@ -2343,6 +2343,8 @@ let clipFlowActionEpoch=0;
 let clipFlowActionBusy=false;
 let clipFlowSeekBusy=false;
 let clipFlowUiPosition=0;
+let clipFlowUiIdentity="";
+let clipFlowStatusPollInFlight=false;
 let clipFlowUiAt=performance.now();
 let clipFlowSeamCache=[];
 let clipFlowAutoMaking=false;
@@ -2376,12 +2378,14 @@ function clipFlowUpdateClockAnchor(runtime){
   const identity=[current.active?1:0,current.phase||"idle",clipFlowPathKey(current.current_clip||""),Number(current.changed_at)||0].join("|");
   const position=Math.max(0,Number(current.position_seconds)||0);
   if(identity!==clipFlowUiIdentity){
+    // A new phase/source generation starts a fresh per-clip clock, including
+    // replaying the exact same filename. Never inherit the previous clip's end.
     clipFlowUiIdentity=identity;clipFlowUiPosition=position;clipFlowUiAt=now;return;
   }
   const projected=clipFlowUiPosition+Math.max(0,now-clipFlowUiAt)/1000;
-  // Polling may correct the local clock forward, but a delayed/stale response
-  // must not rewind it or preserve a previous clip's position after a handoff.
-  if(position>=projected-0.35){
+  // Runtime polling may correct the UI clock forward only. A stale response
+  // must not rewind it. Seek/restart changes the identity and resets the anchor.
+  if(position>projected){
     clipFlowUiPosition=position;clipFlowUiAt=now;
   }
 }
@@ -2392,12 +2396,11 @@ function clipFlowDisplayPosition(){
     let position=Math.max(0,Number(S.source_position_seconds)||0)+Math.max(0,now-stateSnapshotAt)/1000;
     return S.loop?position%duration:Math.min(duration,position);
   }
-  const runtimeDuration=Math.max(0,Number(clipFlowRuntime.duration_seconds)||0);
-  const sourceMatches=clipFlowPathKey(S?.source||"")===clipFlowPathKey(clipFlowRuntime.current_clip||"");
-  const base=runtimeDuration>0?Math.max(0,Number(clipFlowRuntime.position_seconds)||0)
-    :(sourceMatches?Math.max(0,Number(S?.source_position_seconds)||0)+Math.max(0,now-stateSnapshotAt)/1000:Math.max(0,Number(clipFlowRuntime.position_seconds)||0));
+  // The runtime anchor is authoritative for Clip Flow. /api/state can still
+  // describe the previous source briefly during a handoff; do not let its stale
+  // position pin the new clip at EOF.
   const local=clipFlowUiPosition+Math.max(0,now-clipFlowUiAt)/1000;
-  return Math.min(duration,Math.max(base,local));
+  return Math.min(duration,Math.max(0,local));
 }
 function renderClipFlow(){
   const en=$("#clipFlowEnabled");if(en&&document.activeElement!==en)en.checked=!!clipFlowConfig.enabled;
@@ -2478,7 +2481,7 @@ $("#clipFlowSeek")?.addEventListener("change",async e=>{
 setInterval(()=>{
   if((view!=="scenes"&&view!=="settings")||clipFlowSeekBusy)return;
   const slider=$("#clipFlowSeek"),time=$("#clipFlowTime"),remaining=$("#clipFlowRemaining");
-  const duration=Math.max(0,Number(clipFlowRuntime.active?clipFlowRuntime.duration_seconds:S?.source_duration_seconds)||0),position=clipFlowDisplayPosition();
+  const duration=clipFlowTimelineDuration(),position=clipFlowDisplayPosition();
   if(slider&&document.activeElement!==slider&&S?.running&&duration>0)slider.value=String(position);
   if(time&&document.activeElement!==slider)time.textContent=clipFlowClock(position)+" / "+(duration>0?clipFlowClock(duration):"--:--");
   if(remaining)remaining.textContent="เหลือ "+(duration>0?clipFlowClock(Math.max(0,duration-position)):"--:--");
@@ -2722,7 +2725,10 @@ $("#clipFlowStart")?.addEventListener("click",async()=>{
     if(!r?.ok)throw new Error(r?.error||"Backend ปฏิเสธคำสั่งเริ่ม Flow");
     // Reflect the accepted transition immediately; the following ordered GET
     // will fill in the full queue/status. Do not keep showing the previous Stop.
-    clipFlowRuntime={...clipFlowRuntime,active:true,phase:"open",current_clip:r.source||clipFlowConfig.open,current_role:"open",last_error:"",reason:"settings_start"};
+    clipFlowUiIdentity="";clipFlowUiPosition=0;clipFlowUiAt=performance.now();
+    clipFlowRuntime={...clipFlowRuntime,active:true,phase:"open",current_clip:r.source||clipFlowConfig.open,current_role:"open",
+      position_seconds:0,duration_seconds:0,remaining_seconds:0,stop_requested:false,last_error:"",reason:"settings_start",changed_at:0};
+    clipFlowUpdateClockAnchor(clipFlowRuntime);
     renderClipFlow();
     clipFlowMessage("เริ่ม Flow แล้ว: Open → สุ่ม Normal แบบไม่ซ้ำในรอบ");
     notify("เริ่ม Open → Normal แล้ว");
@@ -2753,7 +2759,10 @@ $("#clipFlowStopPreview")?.addEventListener("click",async()=>{
       clipFlowMessage("Stop queued — the current clip will finish before Stop plays.");
       notify("Stop queued: finishing the current clip first");
     }else{
-      clipFlowRuntime={...clipFlowRuntime,active:true,phase:r.phase||"stop",current_clip:r.source||clipFlowConfig.stop,current_role:r.current_role||"stop",stop_requested:false,last_error:"",reason:r.reason||"settings_stop_preview"};
+      clipFlowUiIdentity="";clipFlowUiPosition=0;clipFlowUiAt=performance.now();
+      clipFlowRuntime={...clipFlowRuntime,active:true,phase:r.phase||"stop",current_clip:r.source||clipFlowConfig.stop,current_role:r.current_role||"stop",
+        position_seconds:0,duration_seconds:0,remaining_seconds:0,stop_requested:false,last_error:"",reason:r.reason||"settings_stop_preview",changed_at:0};
+      clipFlowUpdateClockAnchor(clipFlowRuntime);
       clipFlowMessage(r.already_playing_stop?"Stop clip is already playing.":"Playing Stop clip.");
       notify(r.already_playing_stop?"Stop clip is already playing":"Started Stop clip");
     }
