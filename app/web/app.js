@@ -41,7 +41,17 @@ async function launchAIStudio(){
   }catch(e){notify(e.message,false)}
 }
 
-const setCfg=async o=>{Object.assign(S,o);await post("/api/settings",o)};
+const CLIP_FLOW_SEAM_PROFILE_KEYS=new Set(["width","height","fps","fps_mode","source_width","source_height","source_fit_mode"]);
+const setCfg=async o=>{
+  Object.assign(S,o);
+  await post("/api/settings",o);
+  // Scene Builder can change the profile used to render AI Seam bridges. Refresh
+  // compatibility immediately instead of leaving a stale "พร้อมใช้" badge until
+  // the user later opens Playlist or stops the Engine.
+  if(Object.keys(o||{}).some(key=>CLIP_FLOW_SEAM_PROFILE_KEYS.has(key))){
+    await loadClipFlowSeams({attempts:2});
+  }
+};
 let layerWriteQueue=Promise.resolve();
 function commitLayerOrder(order){
   const requested=Array.isArray(order)?[...order]:[];
@@ -2366,6 +2376,8 @@ let clipFlowStatusPollInFlight=false;
 let clipFlowUiAt=performance.now();
 let clipFlowSeamCache=[];
 let clipFlowSeamLoadSeq=0;
+let clipFlowSeamChecking=false;
+let clipFlowSeamCheckError="";
 let clipFlowAutoMaking=false;
 
 const clipBaseName=p=>String(p||"").split(/[\\/]+/).pop();
@@ -2603,13 +2615,20 @@ async function loadClipFlowSeams(options={}){
   const requestSeq=++clipFlowSeamLoadSeq;
   const attempts=Math.max(1,Math.min(5,Number(options.attempts)||3));
   let lastError=null;
+  clipFlowSeamChecking=true;clipFlowSeamCheckError="";renderClipFlowSeams();
   for(let attempt=0;attempt<attempts;attempt++){
     try{
       const r=await api("/api/ai-seam/seams");
       // Older list requests can finish after a newer request and repaint a stale
       // manifest, making completed generated bridges look like they disappeared.
       if(requestSeq!==clipFlowSeamLoadSeq)return r;
-      if(Array.isArray(r.seams)){clipFlowSeamCache=r.seams;renderClipFlowSeams()}
+      if(Array.isArray(r.seams)){
+        clipFlowSeamCache=r.seams;clipFlowSeamChecking=false;clipFlowSeamCheckError="";
+        renderClipFlowSeams();
+      }else{
+        clipFlowSeamChecking=false;clipFlowSeamCheckError="เซิร์ฟเวอร์ไม่ได้ส่งรายการเฟรมคั่นกลับมา";
+        renderClipFlowSeams();
+      }
       return r;
     }catch(e){
       lastError=e;
@@ -2618,8 +2637,9 @@ async function loadClipFlowSeams(options={}){
     }
   }
   if(requestSeq===clipFlowSeamLoadSeq){
-    const status=$("#clipFlowSeamStatus");
-    if(status)status.textContent="อ่านสถานะเฟรมคั่นไม่สำเร็จ: "+String(lastError?.message||lastError||"unknown error");
+    clipFlowSeamChecking=false;
+    clipFlowSeamCheckError=String(lastError?.message||lastError||"unknown error");
+    renderClipFlowSeams();
   }
   return null;
 }
@@ -2630,6 +2650,16 @@ async function waitForClipFlowSeam(fromPath,toPath){
     if(attempt<4)await new Promise(resolve=>setTimeout(resolve,250*(attempt+1)));
   }
   return false;
+}
+function clipFlowSeamCompatibilityReason(seam){
+  const reason=String(seam?.compatibility_reason||"");
+  if(/FPS\/output aspect\/fit differs/i.test(reason))return "Output/FPS/สัดส่วนภาพ/Fit เปลี่ยน";
+  if(/Manual AI input resolution changed/i.test(reason))return "ความละเอียด AI แบบ Manual เปลี่ยน";
+  if(/frame count differs/i.test(reason))return "จำนวนเฟรมคั่นใน AI Settings เปลี่ยน";
+  if(/Older bridge/i.test(reason))return "เฟรมคั่นใช้ Algorithm รุ่นเก่า";
+  if(/current output profile is unavailable/i.test(reason))return "อ่านโปรไฟล์ Output ปัจจุบันไม่ได้";
+  if(/cache missing or source changed/i.test(reason))return "ไฟล์เฟรมคั่นหรือคลิปต้นทางหาย/เปลี่ยน";
+  return reason||"Output/AI Settings ไม่ตรงกับตอนสร้าง";
 }
 function renderClipFlowSeams(){
   const list=$("#clipFlowSeamList"),status=$("#clipFlowSeamStatus"),button=$("#clipFlowAutoMake");
@@ -2642,7 +2672,9 @@ function renderClipFlowSeams(){
     status.textContent="เพิ่มคลิป Normal และตั้งค่า Open/Stop ที่ต้องใช้ก่อนสร้างคู่เฟรมคั่น";
     list.replaceChildren();return;
   }
-  status.textContent="เฟรมคั่นพร้อมใช้ "+ready+"/"+pairs.length+" คู่ทิศทาง · ต้องสร้างเพิ่ม "+missing+" คู่ · ระบบจะแทรกให้อัตโนมัติโดยไม่เพิ่มลงใน Normal";
+  if(clipFlowSeamChecking)status.textContent="กำลังตรวจสอบ Output/AI Settings ของเฟรมคั่น…";
+  else if(clipFlowSeamCheckError)status.textContent="ตรวจสอบสถานะเฟรมคั่นไม่สำเร็จ: "+clipFlowSeamCheckError+" · สถานะเดิมยังไม่ยืนยัน";
+  else status.textContent="เฟรมคั่นพร้อมใช้ "+ready+"/"+pairs.length+" คู่ทิศทาง · ต้องสร้างเพิ่ม "+missing+" คู่ · ระบบจะแทรกให้อัตโนมัติโดยไม่เพิ่มลงใน Normal";
   list.replaceChildren();
   const shown=pairs.slice(0,20);
   for(const pair of shown){
@@ -2650,8 +2682,17 @@ function renderClipFlowSeams(){
     row.style.cssText="gap:8px;align-items:center;flex-wrap:wrap;padding:6px 8px;border:1px solid var(--border,rgba(128,128,128,.22));border-radius:8px";
     const name=document.createElement("span");name.className="small";name.style.cssText="flex:1;min-width:180px;overflow-wrap:anywhere";
     name.textContent=(pair.fromRole==="open"&&pair.toRole==="stop"?"OPEN → STOP · ":pair.fromRole==="open"?"OPEN → NORMAL · ":pair.toRole==="stop"?"NORMAL → STOP · ":"NORMAL → NORMAL · ")+clipBaseName(pair.from)+" → "+clipBaseName(pair.to);
-    const badge=document.createElement("span");badge.className="tag"+(clipFlowHasCachedSeam(pair.from,pair.to)?" live":"");
-    badge.textContent=clipFlowHasCachedSeam(pair.from,pair.to)?"พร้อมใช้":clipFlowSeamCache.some(s=>clipFlowPairKey(s.from_path,s.to_path)===clipFlowPairKey(pair.from,pair.to)&&s.available===true)?"ต้องสร้างใหม่ (Output/Settings เปลี่ยน)":"ยังไม่มีเฟรม";
+    const pairKey=clipFlowPairKey(pair.from,pair.to);
+    const seam=clipFlowSeamCache.find(s=>clipFlowPairKey(s.from_path,s.to_path)===pairKey);
+    const readyNow=!clipFlowSeamChecking&&!clipFlowSeamCheckError&&clipFlowHasCachedSeam(pair.from,pair.to);
+    const badge=document.createElement("span");badge.className="tag"+(readyNow?" live":"");
+    if(clipFlowSeamChecking){badge.textContent="กำลังตรวจสอบ…"}
+    else if(clipFlowSeamCheckError){badge.textContent="ยังยืนยันไม่ได้";badge.title=clipFlowSeamCheckError}
+    else if(readyNow){badge.textContent="พร้อมใช้"}
+    else if(seam?.available===true){
+      badge.textContent="ต้องสร้างใหม่ · "+clipFlowSeamCompatibilityReason(seam);
+      badge.title=String(seam.compatibility_reason||"Output/AI Settings mismatch");
+    }else{badge.textContent="ยังไม่มีเฟรม"}
     row.append(name,badge);list.appendChild(row);
   }
   if(pairs.length>shown.length){

@@ -301,4 +301,21 @@ check("auto-update activity signal is connected end-to-end", () => {
   assert.ok(source.includes('["pointerdown","pointermove","keydown","input","change"]'));
 });
 
+check("Scene/Output profile changes immediately refresh AI Seam compatibility", () => {
+  assert.match(source, /const CLIP_FLOW_SEAM_PROFILE_KEYS=new Set\(\["width","height","fps","fps_mode","source_width","source_height","source_fit_mode"\]\)/);
+  assert.match(source, /await post\("\/api\/settings",o\);[\s\S]*?if\(Object\.keys\(o\|\|\{\}\)\.some\(key=>CLIP_FLOW_SEAM_PROFILE_KEYS\.has\(key\)\)\)\{[\s\S]*?await loadClipFlowSeams\(\{attempts:2\}\)/);
+});
+check("Seam UI does not claim cached bridges are ready while a fresh compatibility check is pending", () => {
+  assert.match(source, /let clipFlowSeamChecking=false/);
+  assert.match(source, /clipFlowSeamChecking=true;clipFlowSeamCheckError="";renderClipFlowSeams\(\)/);
+  assert.match(source, /readyNow=!clipFlowSeamChecking&&!clipFlowSeamCheckError&&clipFlowHasCachedSeam/);
+  assert.ok(source.includes("กำลังตรวจสอบ Output/AI Settings ของเฟรมคั่น"));
+  assert.ok(source.includes("สถานะเดิมยังไม่ยืนยัน"));
+});
+check("Incompatible seam rows explain the actual backend reason", () => {
+  assert.ok(source.includes("function clipFlowSeamCompatibilityReason(seam)"));
+  assert.ok(source.includes("Output/FPS/สัดส่วนภาพ/Fit เปลี่ยน"));
+  assert.ok(source.includes("ความละเอียด AI แบบ Manual เปลี่ยน"));
+  assert.ok(source.includes("badge.title=String(seam.compatibility_reason||"));
+});
 process.stdout.write("CLIPFLOW_TIMELINE_QA=" + passed.length + " PASS\n");

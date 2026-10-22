@@ -38,11 +38,11 @@ $UiQaCode = $LASTEXITCODE
 if($UiQaCode -ne 0){ throw "Clip Flow timeline regression QA failed ($UiQaCode). Installer build aborted." }
 Write-Host "=== PRE-BUILD CLIP FLOW TIMELINE QA PASS ===" -ForegroundColor Green
 
-# Version 1.4.5 Beta preflight: compile both Python runtime modules and run
+# Version 1.4.6 Fix Bug Beta preflight: compile both Python runtime modules and run
 # focused Make Frames concurrency, seek/start exclusion, and directed-seam checks.
 $QaPythonPre = Join-Path $Root ".venv\Scripts\python.exe"
 if(-not (Test-Path -LiteralPath $QaPythonPre)){ throw "Pre-build QA Python is missing: $QaPythonPre" }
-Write-Host "=== PRE-BUILD v1.4.5 BETA SOURCE + DIRECTED SEAM MATRIX QA ===" -ForegroundColor Cyan
+Write-Host "=== PRE-BUILD v1.4.6 FIX BUG BETA SOURCE + DIRECTED SEAM MATRIX QA ===" -ForegroundColor Cyan
 & $QaPythonPre -m py_compile (Join-Path $Root "app\ai_seam.py") (Join-Path $Root "app\server.py")
 if($LASTEXITCODE -ne 0){ throw "Python source compile QA failed ($LASTEXITCODE)." }
 $MatrixQaScripts = @(
@@ -54,14 +54,14 @@ $MatrixQaScripts = @(
   (Join-Path $Root "qa_clipflow_20261017\test_open_fps_profile_145.py")
 )
 foreach($qaScriptPath in $MatrixQaScripts){
-  if(-not (Test-Path -LiteralPath $qaScriptPath)){ throw "Required v1.4.5 Beta QA script missing: $qaScriptPath" }
+  if(-not (Test-Path -LiteralPath $qaScriptPath)){ throw "Required v1.4.6 Fix Bug Beta QA script missing: $qaScriptPath" }
   & $QaPythonPre $qaScriptPath
-  if($LASTEXITCODE -ne 0){ throw "Pre-build v1.4.5 Beta QA failed: $qaScriptPath (exit $LASTEXITCODE)." }
+  if($LASTEXITCODE -ne 0){ throw "Pre-build v1.4.6 Fix Bug Beta QA failed: $qaScriptPath (exit $LASTEXITCODE)." }
 }
 $AiSeamSourceQa = Join-Path $Root "qa_clipflow_20261017\test_ai_seam_studio_20261022.py"
 & $QaPythonPre $AiSeamSourceQa --timeout 90 --skip-flow
 if($LASTEXITCODE -ne 0){ throw "Source AI Seam/RIFE QA failed ($LASTEXITCODE); refusing to build installer." }
-Write-Host "=== PRE-BUILD v1.4.5 BETA SOURCE + DIRECTED SEAM MATRIX QA PASS ===" -ForegroundColor Green
+Write-Host "=== PRE-BUILD v1.4.6 FIX BUG BETA SOURCE + DIRECTED SEAM MATRIX QA PASS ===" -ForegroundColor Green
 
 Write-Host "=== BUILD FROZEN PYTHON BACKEND FROM CURRENT SOURCES ===" -ForegroundColor Cyan
 $BackendPython = Join-Path $Root ".venv\Scripts\python.exe"
@@ -70,9 +70,9 @@ if(-not (Test-Path -LiteralPath $BackendPython)){
   $BackendPython = (Get-Command py -ErrorAction Stop).Source
   $BackendPythonArgs = @("-3")
 }
-$BackendDist = Join-Path $Root "build\server-dist-v145"
-$BackendWork = Join-Path $Root "build\server-build-v145"
-$BackendSpec = Join-Path $Root "build\server-spec-v145"
+$BackendDist = Join-Path $Root "build\server-dist-v146"
+$BackendWork = Join-Path $Root "build\server-build-v146"
+$BackendSpec = Join-Path $Root "build\server-spec-v146"
 foreach($dir in @($BackendDist,$BackendWork,$BackendSpec)){
   Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -127,7 +127,7 @@ Copy-Item (Join-Path $Desktop "package.json") (Join-Path $AppDir "package.json")
 Copy-Item (Join-Path $Root "build\runtime\paokra-server.exe") (Join-Path $Runtime "paokra-server.exe") -Force
 $PackagedBackend = Join-Path $Runtime "paokra-server.exe"
 $PackagedBackendHash = (Get-FileHash -LiteralPath $PackagedBackend -Algorithm SHA256).Hash
-if($PackagedBackendHash -ne $BackendRuntimeHash){ throw "Packaged backend does not match the fresh v1.4.5 Beta PyInstaller output." }
+if($PackagedBackendHash -ne $BackendRuntimeHash){ throw "Packaged backend does not match the fresh v1.4.6 Fix Bug Beta PyInstaller output." }
 Write-Host ("Packaged backend integrity verified · SHA256 {0}" -f $PackagedBackendHash) -ForegroundColor Green
 
 # Bundle tiktokls.exe (TikTok LIVE Studio CLI) into cli/ inside the runtime
