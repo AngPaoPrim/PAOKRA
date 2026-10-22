@@ -228,6 +228,7 @@ check("System Update FIX offers versions, separate progress stages and verifies 
   const main = fs.readFileSync(path.join(root, "desktop", "main.cjs"), "utf8");
   const updateUi = fs.readFileSync(path.join(root, "desktop", "system-update.html"), "utf8");
   assert.ok(updateUi.includes('id="v"') && updateUi.includes("system-update-list"));
+  assert.ok(updateUi.includes("rs.find(x=>x.tag==='v1.4.4-system-update-fix')"), "System Update FIX should default to the supplemental build, not the older stable release");
   assert.ok(updateUi.includes('id="db"') && updateUi.includes('id="ib"'));
   assert.ok(updateUi.includes("system-update-download',r.asset,r.tag,r.size,r.digest"));
   assert.ok(main.includes('digest:String(a.digest||"")'));
