@@ -43,6 +43,106 @@ def _path_key(value: str | Path) -> str:
         return os.path.normcase(str(value))
 
 
+def _device_name_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+
+def _device_names_match(left: Any, right: Any) -> bool:
+    a, b = _device_name_key(left), _device_name_key(right)
+    return bool(a and b and (a in b or b in a))
+
+
+def _dxgi_video_adapters() -> list[dict[str, Any]]:
+    """Read exact dedicated-memory descriptors from DXGI on Windows.
+
+    Win32_VideoController.AdapterRAM is a 32-bit field and saturates close to
+    4 GiB for some 8 GiB adapters. IDXGIAdapter1::GetDesc1 uses SIZE_T and
+    reports the driver's 64-bit dedicated-memory value instead.
+    """
+    if os.name != "nt":
+        return []
+    try:
+        import ctypes
+        import ctypes.wintypes as wt
+        import uuid
+
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wt.DWORD), ("Data2", wt.WORD), ("Data3", wt.WORD),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+        class LUID(ctypes.Structure):
+            _fields_ = [("LowPart", wt.DWORD), ("HighPart", wt.LONG)]
+
+        class DXGI_ADAPTER_DESC1(ctypes.Structure):
+            _fields_ = [
+                ("Description", ctypes.c_wchar * 128),
+                ("VendorId", wt.UINT), ("DeviceId", wt.UINT),
+                ("SubSysId", wt.UINT), ("Revision", wt.UINT),
+                ("DedicatedVideoMemory", ctypes.c_size_t),
+                ("DedicatedSystemMemory", ctypes.c_size_t),
+                ("SharedSystemMemory", ctypes.c_size_t),
+                ("AdapterLuid", LUID), ("Flags", wt.UINT),
+            ]
+
+        u = uuid.UUID("770aae78-f26f-4dba-a829-253c83d1b387")
+        iid = GUID(u.time_low, u.time_mid, u.time_hi_version,
+                   (ctypes.c_ubyte * 8).from_buffer_copy(u.bytes[8:]))
+
+        def vmethod(pointer, index, result_type, arg_types):
+            table = ctypes.cast(
+                pointer, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))
+            ).contents
+            return ctypes.WINFUNCTYPE(result_type, *arg_types)(table[index])
+
+        dxgi = ctypes.WinDLL("dxgi")
+        create_factory = dxgi.CreateDXGIFactory1
+        create_factory.argtypes = [
+            ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p)
+        ]
+        create_factory.restype = ctypes.c_long
+        factory = ctypes.c_void_p()
+        hr = create_factory(ctypes.byref(iid), ctypes.byref(factory))
+        if hr != 0 or not factory.value:
+            return []
+
+        enum_adapter = vmethod(
+            factory, 12, ctypes.c_long,
+            [ctypes.c_void_p, wt.UINT, ctypes.POINTER(ctypes.c_void_p)],
+        )
+        found: list[dict[str, Any]] = []
+        try:
+            for index in range(32):
+                adapter = ctypes.c_void_p()
+                hr = enum_adapter(factory, index, ctypes.byref(adapter))
+                if hr != 0 or not adapter.value:
+                    break
+                try:
+                    get_desc = vmethod(
+                        adapter, 10, ctypes.c_long,
+                        [ctypes.c_void_p, ctypes.POINTER(DXGI_ADAPTER_DESC1)],
+                    )
+                    desc = DXGI_ADAPTER_DESC1()
+                    if get_desc(adapter, ctypes.byref(desc)) == 0:
+                        found.append({
+                            "name": str(desc.Description).strip(),
+                            "vendor_id": int(desc.VendorId),
+                            "dedicated_bytes": int(desc.DedicatedVideoMemory),
+                            "shared_bytes": int(desc.SharedSystemMemory),
+                            "flags": int(desc.Flags),
+                        })
+                finally:
+                    vmethod(adapter, 2, ctypes.c_ulong, [ctypes.c_void_p])(adapter)
+        finally:
+            vmethod(factory, 2, ctypes.c_ulong, [ctypes.c_void_p])(factory)
+        return found
+    except Exception:
+        # Detection must fall through to Vulkan/NVIDIA telemetry/WMI rather than
+        # preventing the rest of PAOKRA from starting.
+        return []
+
+
 def _file_signature(path: str | Path) -> dict[str, int]:
     p = Path(path)
     st = p.stat()
@@ -394,9 +494,10 @@ class AiSeamService:
             return False, [], f"{type(exc).__name__}: {str(exc)[:180]}"
 
     def _run_rife(self, a: Path, b: Path, out: Path, fraction: float, compute: str,
-                  model: Path, timeout: int = 45, jobs: str = "1:1:1") -> tuple[bool, str, float]:
+                  model: Path, timeout: int = 45, jobs: str = "1:1:1",
+                  gpu_index: int = 0) -> tuple[bool, str, float]:
         exe, _, _ = self._exe_paths()
-        gpu_arg = "-1" if compute == "cpu" else "0"
+        gpu_arg = "-1" if compute == "cpu" else str(max(0, min(31, int(gpu_index or 0))))
         jobs = jobs if re.fullmatch(r"[1-2]:[1-2]:[1-2]", str(jobs or "")) else "1:1:1"
         if compute == "cpu":
             jobs = "1:1:1"
@@ -445,6 +546,17 @@ class AiSeamService:
                     if visible:
                         adapter = max(visible, key=lambda item: int(item.get("AdapterRAM") or 0))
                         total = int(adapter.get("AdapterRAM") or 0)
+                        # AdapterRAM is a 32-bit field on many Windows drivers. A value
+                        # near 0xFFFFFFFF can mean either a 4 GiB card or an 8+ GiB card
+                        # clipped by WMI; never report that ambiguous value as exact VRAM.
+                        if total >= (4 * 1024 ** 3 - 8 * 1024 ** 2):
+                            return {
+                                "vram_total_bytes": 0, "vram_budget_bytes": 0,
+                                "vram_used_bytes": 0, "vram_available_bytes": 0,
+                                "vram_source": "unavailable (WMI AdapterRAM saturated)",
+                                "gpu_device": str(adapter.get("Name") or ""),
+                                "vram_note": "Windows AdapterRAM is at its 32-bit ceiling and cannot distinguish 4 GiB from larger VRAM. " + str(reason)[:160],
+                            }
                         # WMI does not report the live budget. Reserve 30% for Windows/driver usage.
                         budget = int(total * 0.85)
                         available = int(total * 0.70)
@@ -463,8 +575,53 @@ class AiSeamService:
             "vram_note": str(reason)[:300],
         }
 
-    def _vulkan_memory_info(self) -> dict[str, Any]:
-        """Prefer fast live NVIDIA telemetry; otherwise inspect Vulkan heap budgets."""
+    def _vulkan_memory_info(self, devices: list[str] | None = None) -> dict[str, Any]:
+        """Read the selected RIFE adapter's VRAM without trusting 32-bit WMI values."""
+        devices = list(devices or [])
+        try:
+            adapters = [
+                x for x in _dxgi_video_adapters()
+                if int(x.get("dedicated_bytes") or 0) > 0 and not (int(x.get("flags") or 0) & 2)
+                and not re.search(r"microsoft basic|remote display|software|swiftshader|lavapipe",
+                                  str(x.get("name") or ""), re.I)
+            ]
+            selected = None
+            selected_index = 0
+            # RIFE's -g argument is the Vulkan adapter index. Match that ordered
+            # list to DXGI instead of accidentally displaying a different GPU's VRAM.
+            for index, vulkan_name in enumerate(devices):
+                selected = next((a for a in adapters
+                                 if _device_names_match(a.get("name"), vulkan_name)), None)
+                if selected is not None:
+                    selected_index = index
+                    break
+            if selected is None and adapters:
+                selected = max(adapters, key=lambda x: int(x.get("dedicated_bytes") or 0))
+                matching_index = next((i for i, name in enumerate(devices)
+                                       if _device_names_match(name, selected.get("name"))), None)
+                selected_index = int(matching_index) if matching_index is not None else 0
+            if selected is not None:
+                total = int(selected["dedicated_bytes"])
+                # DXGI reports dedicated capacity, not live free memory. Use a
+                # conservative sizing allowance and label it as an estimate.
+                budget = int(total * 0.80)
+                available = int(total * 0.65)
+                return {
+                    "vram_total_bytes": total, "vram_budget_bytes": budget,
+                    "vram_used_bytes": max(0, total - available),
+                    "vram_available_bytes": available,
+                    "vram_source": "DXGI IDXGIAdapter1::GetDesc1 (64-bit dedicated memory)",
+                    "gpu_device": str(selected.get("name") or ""),
+                    "gpu_index": selected_index,
+                    "vram_note": (
+                        "Dedicated VRAM capacity read from the matching DXGI adapter. "
+                        "DXGI does not provide live free/used VRAM; budget and available "
+                        "values are conservative estimates, not live telemetry."
+                    ),
+                }
+        except Exception:
+            pass
+
         nvidia_smi = shutil.which("nvidia-smi")
         if nvidia_smi:
             try:
@@ -549,10 +706,16 @@ class AiSeamService:
             gpu_info = dict(self._hardware_profile_cache)
         else:
             names = list(devices or self._vulkan_devices()[1])
-            gpu_info = self._vulkan_memory_info()
-            gpu_info["gpu_device"] = next(
-                (name for name in names if not re.search(r"microsoft|swiftshader|lavapipe|software", name, re.I)), ""
-            )
+            gpu_info = self._vulkan_memory_info(names)
+            if not gpu_info.get("gpu_device"):
+                gpu_info["gpu_device"] = next(
+                    (name for name in names if not re.search(r"microsoft|swiftshader|lavapipe|software", name, re.I)), ""
+                )
+            if not isinstance(gpu_info.get("gpu_index"), int):
+                gpu_info["gpu_index"] = next(
+                    (index for index, name in enumerate(names)
+                     if not re.search(r"microsoft|swiftshader|lavapipe|software", name, re.I)), 0
+                )
             gpu_info["vulkan_devices"] = names
             self._hardware_profile_cache = dict(gpu_info)
             self._hardware_profile_at = now
@@ -626,10 +789,14 @@ class AiSeamService:
         started = time.monotonic()
         exe, model, ffmpeg = self._exe_paths()
         vulkan_ok, devices, vulkan_note = self._vulkan_devices()
-        resource = self._resource_profile(force=False, devices=devices)
+        # An explicit Scan is a fresh hardware check; do not reuse a stale
+        # 180-second resource profile when this user action promises a rescan.
+        resource = self._resource_profile(force=True, devices=devices)
         mem = psutil.virtual_memory()
         disk = shutil.disk_usage(str(self.data))
-        gpu = next((x for x in devices if not re.search(r"microsoft|swiftshader|lavapipe|software", x, re.I)), "")
+        gpu = str(resource.get("gpu_device") or next(
+            (x for x in devices if not re.search(r"microsoft|swiftshader|lavapipe|software", x, re.I)), ""
+        ))
         test_compute = compute_override or str(self.settings().get("compute", "auto"))
         # RIFE inference itself verifies Vulkan device 0; vulkaninfo is only a diagnostic.
         chosen = "gpu" if test_compute == "auto" else test_compute
@@ -646,11 +813,16 @@ class AiSeamService:
                 two = np.roll(one, 5, axis=1)
                 a, b, out = probe_dir / "a.png", probe_dir / "b.png", probe_dir / "out.png"
                 cv2.imwrite(str(a), one); cv2.imwrite(str(b), two)
-                ok, note, elapsed = self._run_rife(a, b, out, 0.5, chosen, model, timeout=25)
+                ok, note, elapsed = self._run_rife(
+                    a, b, out, 0.5, chosen, model, timeout=25,
+                    gpu_index=int(resource.get("gpu_index") or 0),
+                )
                 probe = {"ok": bool(ok), "compute": chosen, "seconds": round(elapsed, 3),
                          "message": "inference passed" if ok else str(note)[-750:]}
                 if not ok and test_compute == "auto" and chosen == "gpu":
-                    ok2, note2, elapsed2 = self._run_rife(a, b, out, 0.5, "cpu", model, timeout=30)
+                    ok2, note2, elapsed2 = self._run_rife(
+                        a, b, out, 0.5, "cpu", model, timeout=30, gpu_index=0,
+                    )
                     probe = {"ok": bool(ok2), "compute": "cpu" if ok2 else "gpu", "seconds": round(elapsed + elapsed2, 3),
                              "message": "GPU probe failed; CPU inference passed" if ok2 else str(note2)[-750:],
                              "gpu_probe_error": str(note)[-500:]}
@@ -670,7 +842,8 @@ class AiSeamService:
             "ram_total_bytes": int(mem.total), "ram_available_bytes": int(mem.available),
             "ram_available_percent": round(float(mem.available) / max(1, int(mem.total)) * 100, 1),
             "disk_free_bytes": int(disk.free), "disk_total_bytes": int(disk.total),
-            "vulkan_available": bool(vulkan_ok), "vulkan_devices": devices, "gpu_device": gpu,
+            "vulkan_available": bool(vulkan_ok), "vulkan_devices": devices,
+            "gpu_device": gpu, "gpu_index": int(resource.get("gpu_index") or 0),
             "vram_total_bytes": int(resource.get("vram_total_bytes") or 0),
             "vram_budget_bytes": int(resource.get("vram_budget_bytes") or 0),
             "vram_used_bytes": int(resource.get("vram_used_bytes") or 0),
@@ -776,7 +949,7 @@ class AiSeamService:
             if not p.is_file() or _file_signature(p) != c.get("signature"):
                 raise ValueError(f"Clip changed or disappeared; remove and re-add it: {c['name']}")
         w, h, fit, fps, _ = self._canvas_profile(a, settings)
-        transition_seconds = int(settings["transition_frames"]) / max(1, fps)
+        transition_seconds = (int(settings["transition_frames"]) + 1) / max(1, fps)
         if float(b.get("duration") or 0.0) <= transition_seconds + 1.0 / max(1.0, float(b.get("fps") or 30.0)):
             raise ValueError("The destination clip is too short for this transition length")
         last, _ = _frame_from(Path(a["path"]), tail=True)
@@ -857,7 +1030,10 @@ class AiSeamService:
             w = max(32, int(w) & ~1)
             h = max(32, int(h) & ~1)
             frames_count = _safe_int(settings.get("transition_frames"), 4, 12, 8)
-            resume = frames_count / float(fps)
+            # Generate only INTERIOR frames. Including A-last and B-resume as
+            # first/last bridge frames duplicated those timestamps at the source
+            # handoff and made the live feed briefly freeze at both ends.
+            resume = (frames_count + 1) / float(fps)
             if float(b.get("duration") or 0.0) <= resume + 1.0 / max(1.0, float(b.get("fps") or 30.0)):
                 raise ValueError("Destination clip is too short to make this transition safely")
             self._job_update(job_id, phase="analyzing", progress=8, message="Comparing the last frame of A with the matching-time frame of B")
@@ -889,20 +1065,15 @@ class AiSeamService:
             elapsed_rife = 0.0
             actual_compute = compute
             errors: list[str] = []
-            # RIFE rejects timestep 1.0. Keep the exact last A frame as the
-            # first bridge frame, interpolate only the interior, then copy the
-            # exact B resume frame as the final frame. This makes both bridge
-            # endpoints match their source clips instead of adding a hard cut.
-            fractions = [i / float(frames_count - 1) for i in range(1, frames_count - 1)]
+            # RIFE rejects timestep 1.0. Render only interior points between
+            # A's final displayed frame and B's resume frame. The exact endpoints
+            # remain in the source clips; repeating them inside the bridge caused
+            # an extra held frame at each clip handoff.
+            fractions = [i / float(frames_count + 1) for i in range(1, frames_count + 1)]
             def run_all(device: str) -> tuple[bool, float, str]:
                 total = 0.0
                 note = ""
-                try:
-                    shutil.copyfile(a_png, generated / "00000001.png")
-                    shutil.copyfile(b_png, generated / f"{frames_count:08d}.png")
-                except Exception as exc:
-                    return False, total, f"could not write exact seam endpoint frames: {type(exc).__name__}: {exc}"
-                for idx, fraction in enumerate(fractions, 2):
+                for idx, fraction in enumerate(fractions, 1):
                     out = generated / f"{idx:08d}.png"
                     try:
                         out.unlink(missing_ok=True)
@@ -910,7 +1081,8 @@ class AiSeamService:
                         pass
                     ok, msg, duration = self._run_rife(
                         a_png, b_png, out, fraction, device, model, timeout=45,
-                        jobs=(rife_jobs if device == "gpu" else "1:1:1")
+                        jobs=(rife_jobs if device == "gpu" else "1:1:1"),
+                        gpu_index=int(resources.get("gpu_index") or 0),
                     )
                     total += duration
                     if not ok:
@@ -928,11 +1100,18 @@ class AiSeamService:
                     if image is None or image.shape[:2] != (h, w):
                         got = None if image is None else (image.shape[1], image.shape[0])
                         return False, total, f"frame {idx}/{frames_count}: expected {w}x{h}, got {got}"
-                    self._job_update(job_id, phase="inference", progress=12 + int(66 * (idx - 1) / frames_count),
-                                                                           message=f"Generating bridge frame {idx}/{frames_count} on {'Vulkan GPU' if device == 'gpu' else 'CPU'} · RIFE jobs {(rife_jobs if device == 'gpu' else '1:1:1')}")
+                    self._job_update(
+                        job_id, phase="inference",
+                        progress=12 + int(66 * idx / frames_count),
+                        message=f"Generating interior bridge frame {idx}/{frames_count} on "
+                                f"{'Vulkan GPU' if device == 'gpu' else 'CPU'} | "
+                                f"RIFE jobs {(rife_jobs if device == 'gpu' else '1:1:1')}",
+                    )
                     note = msg
-                self._job_update(job_id, phase="inference", progress=82,
-                                 message="Exact A/B endpoints added; intermediate frames verified")
+                self._job_update(
+                    job_id, phase="inference", progress=82,
+                    message="Interior bridge frames verified; exact source endpoints remain in A and B",
+                )
                 return True, total, note
             ok, elapsed_rife, note = run_all(compute)
             if not ok and requested_compute == "auto" and compute == "gpu":
@@ -1023,6 +1202,7 @@ class AiSeamService:
                 "to_duration": float(b.get("duration") or 0.0), "fps": fps,
                 "to_endpoint_seconds": 0.0, "frame_count": frames_count, "width": out_w, "height": out_h,
                 "max_side": int(settings.get("max_side") or 512),
+                "bridge_algorithm": "interior-only-v2",
                 "target_aspect": round(float(w) / max(1.0, float(h)), 7), "fit": fit,
                 "score": similarity["score"], "risk": similarity["risk"],
                 "compute": actual_compute, "rife_jobs": (rife_jobs if actual_compute == "gpu" else "1:1:1"),
@@ -1030,11 +1210,32 @@ class AiSeamService:
                 "inference_seconds": round(elapsed_rife, 3),
                 "size": asset.stat().st_size, "created_at": time.time(),
             }
+            # Commit the newly verified bridge before removing a superseded
+            # bridge for this exact directed pair. If persistence fails, the old
+            # asset remains available; unrelated pairs and orphaned complete assets
+            # are never deleted as a side effect of generation.
             with self.lock:
-                self.manifest["seams"] = [s for s in self.manifest["seams"]
-                    if not (s.get("from_id") == a["id"] and s.get("to_id") == b["id"])]
+                superseded = [
+                    dict(s) for s in self.manifest["seams"]
+                    if s.get("from_id") == a["id"] and s.get("to_id") == b["id"]
+                ]
+                self.manifest["seams"] = [
+                    s for s in self.manifest["seams"]
+                    if not (s.get("from_id") == a["id"] and s.get("to_id") == b["id"])
+                ]
                 self.manifest["seams"].append(record)
                 self.save()
+            current_asset_key = _path_key(asset)
+            for old_record in superseded:
+                old_asset = self._safe_cache_asset(old_record.get("asset"))
+                if old_asset is None or _path_key(old_asset) == current_asset_key:
+                    continue
+                try:
+                    old_asset.unlink(missing_ok=True)
+                except OSError:
+                    # Keep any file Windows still has open; it is no longer a
+                    # playback entry and can be removed by an explicit Clear Cache.
+                    pass
             self._job_update(job_id, status="complete", phase="complete", progress=100,
                              message="Transition generated and verified", error=None, result=record,
                              compute_used=actual_compute, inference_seconds=round(elapsed_rife, 3),
@@ -1075,9 +1276,16 @@ class AiSeamService:
                 current_settings = self._effective_settings()
                 if int(seam.get("frame_count") or 0) != int(current_settings.get("transition_frames") or 8):
                     continue
-                # Old caches without a recorded model/input limit are intentionally
-                # stale: do not advertise them as current under adaptive GPU settings.
-                if int(seam.get("max_side") or 0) != int(current_settings.get("max_side") or 0):
+                # Adaptive profiles vary by PC. A verified bridge remains usable
+                # across Auto-profile changes: only an explicit/manual input size
+                # change requires regeneration. Never invalidate a good cache just
+                # because another PC reports a different amount of VRAM.
+                if (str(seam.get("resolution_mode") or "manual") != "auto"
+                        and int(seam.get("max_side") or 0) != int(current_settings.get("max_side") or 0)):
+                    continue
+                # Version 2 uses interior-only interpolation; the earlier algorithm
+                # repeated A/B endpoints and could cause a held frame at handoff.
+                if seam.get("bridge_algorithm") != "interior-only-v2":
                     continue
                 if runtime_profile is not None:
                     cw, ch, current_fit, current_fps, _duration = self._canvas_profile(
@@ -1131,8 +1339,11 @@ class AiSeamService:
                     reason = "cache missing or source changed"
                 elif int(seam.get("frame_count") or 0) != int(current_settings.get("transition_frames") or 8):
                     reason = "bridge frame count differs from AI Settings"
-                elif int(seam.get("max_side") or 0) != int(current_settings.get("max_side") or 0):
-                    reason = "AI input resolution profile changed; regenerate this seam"
+                elif (str(seam.get("resolution_mode") or "manual") != "auto"
+                      and int(seam.get("max_side") or 0) != int(current_settings.get("max_side") or 0)):
+                    reason = "Manual AI input resolution changed; regenerate this seam"
+                elif seam.get("bridge_algorithm") != "interior-only-v2":
+                    reason = "Older bridge contains repeated source endpoints; regenerate once for smoother handoff"
                 elif not profile:
                     reason = "current output profile is unavailable"
                 else:
@@ -1263,53 +1474,43 @@ class AiSeamService:
 
     def _prune_cache(self, max_bytes: int = MAX_CACHE_BYTES,
                      preserve_paths: tuple[str | Path, ...] = ()) -> dict[str, int]:
-        """Evict oldest generated bridges without deleting user source clips or the current output."""
-        max_bytes = max(0, int(max_bytes))
-        protected = set()
-        for raw in preserve_paths:
-            try: protected.add(str(Path(raw).resolve()))
-            except Exception: pass
-        with self.lock:
-            seams = [dict(x) for x in self.manifest["seams"]]
-        refs = {str(asset): seam for seam in seams if (asset := self._safe_cache_asset(seam.get("asset"))) is not None}
-        files = [p for p in self.cache_dir.glob("*.mp4") if p.is_file()]
-        sizes = {str(p.resolve()): int(p.stat().st_size) for p in files}
-        total = sum(sizes.values())
+        """Clean abandoned partial encodes only; never evict a generated bridge automatically.
+
+        Directed transitions are expensive inference products. Deleting the oldest
+        complete MP4 here made Auto Make appear to lose frames when a playlist's
+        transition matrix exceeded MAX_CACHE_BYTES. The quota is informational now:
+        only the explicit Clear Cache action may remove finished bridge assets.
+        Unregistered complete MP4s are preserved too, as they may be the last result
+        of a process interrupted between atomic rename and manifest persistence.
+        """
+        del max_bytes  # Retained in the signature for compatibility with older callers.
         deleted_files = 0
         deleted_bytes = 0
-        remove_ids: set[str] = set()
-        # Orphans are cleanup targets except for a just-encoded asset not yet registered.
-        orphan_paths = [p for p in files if str(p.resolve()) not in refs and str(p.resolve()) not in protected]
-        for path in orphan_paths:
-            try:
-                size = sizes.get(str(path.resolve()), 0)
-                path.unlink(missing_ok=True)
-                total -= size; deleted_bytes += size; deleted_files += 1
-            except Exception:
-                pass
-        older = sorted(seams, key=lambda x: float(x.get("created_at") or 0.0))
-        for seam in older:
-            if total <= max_bytes:
-                break
-            asset = self._safe_cache_asset(seam.get("asset"))
-            if asset is None:
-                remove_ids.add(str(seam.get("id") or ""))
-                continue
-            key = str(asset)
-            if key in protected:
-                continue
-            size = sizes.get(key, 0)
-            try:
-                asset.unlink(missing_ok=True)
-                total -= size; deleted_bytes += size; deleted_files += int(size > 0 or not asset.exists())
-                remove_ids.add(str(seam.get("id") or ""))
-            except Exception:
-                continue
-        if remove_ids:
-            with self.lock:
-                self.manifest["seams"] = [x for x in self.manifest["seams"] if str(x.get("id") or "") not in remove_ids]
-                self.save()
-        return {"files_deleted": deleted_files, "bytes_deleted": deleted_bytes, "remaining_bytes": max(0, total)}
+        cutoff = time.time() - 24 * 60 * 60
+        # A partial/part asset older than 24 hours cannot belong to a live job because
+        # generation is serialized. Keep fresh partials so a future concurrent build
+        # or a process restart cannot race this cleanup.
+        for pattern in ("*.part.mp4", "*.partial.mp4"):
+            for path in self.cache_dir.glob(pattern):
+                try:
+                    if not path.is_file() or path.stat().st_mtime > cutoff:
+                        continue
+                    size = int(path.stat().st_size)
+                    path.unlink()
+                    deleted_files += 1
+                    deleted_bytes += size
+                except OSError:
+                    continue
+        finished = [p for p in self.cache_dir.glob("*.mp4")
+                    if p.is_file() and not p.name.endswith((".part.mp4", ".partial.mp4"))]
+        total = sum(int(p.stat().st_size) for p in finished)
+        return {
+            "files_deleted": deleted_files,
+            "bytes_deleted": deleted_bytes,
+            "remaining_bytes": max(0, total),
+            "quota_exceeded": total > MAX_CACHE_BYTES,
+            "quota_bytes": MAX_CACHE_BYTES,
+        }
 
     def clear_cache(self) -> dict[str, Any]:
         guard = self.generation_guard if self.generation_guard is not None else nullcontext()

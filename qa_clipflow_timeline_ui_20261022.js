@@ -193,10 +193,14 @@ check("AI Seam Preview composes source + generated bridge + destination", () => 
   assert.ok(ai.includes('@bp.get("/seams/<seam_id>/preview")'));
   assert.ok(source.includes('/api/ai-seam/seams/\${encodeURIComponent(b.dataset.aisPreview)}/preview'));
 });
-check("AI Seam endpoint frame and destination resume timestamp agree", () => {
+check("AI Seam interior timing avoids duplicated clip endpoints", () => {
   const ai = fs.readFileSync(path.join(root, "app", "ai_seam.py"), "utf8");
   assert.ok(ai.includes('next_frame, _ = _frame_from(Path(b["path"]), at_seconds=transition_seconds)'));
   assert.ok(ai.includes("first_b, _ = _frame_from(p_b, at_seconds=resume)"));
+  assert.ok(ai.includes('transition_seconds = (int(settings["transition_frames"]) + 1) / max(1, fps)'));
+  assert.ok(ai.includes("resume = (frames_count + 1) / float(fps)"));
+  assert.ok(ai.includes("fractions = [i / float(frames_count + 1) for i in range(1, frames_count + 1)]"));
+  assert.ok(ai.includes('"bridge_algorithm": "interior-only-v2"'));
   assert.ok(server.includes('seam_next_role="stop"'));
   assert.ok(server.includes('keep_stop_pending = bool(clip_flow_runtime.get("stop_requested")) and target_phase == "normal"'));
 });
@@ -219,6 +223,19 @@ check("Auto-update retries startup checks and explicitly requests silent install
   assert.ok(main.includes("generationBusy"));
   assert.ok(main.includes('readRuntimeJsonForUpdate("/api/ai-seam/status")'));
   assert.ok(main.includes("appIsQuitting = true"));
+});
+check("System Update FIX offers versions, separate progress stages and verifies downloaded installer", () => {
+  const main = fs.readFileSync(path.join(root, "desktop", "main.cjs"), "utf8");
+  const updateUi = fs.readFileSync(path.join(root, "desktop", "system-update.html"), "utf8");
+  assert.ok(updateUi.includes('id="v"') && updateUi.includes("system-update-list"));
+  assert.ok(updateUi.includes('id="db"') && updateUi.includes('id="ib"'));
+  assert.ok(updateUi.includes("system-update-download',r.asset,r.tag,r.size,r.digest"));
+  assert.ok(main.includes('digest:String(a.digest||"")'));
+  assert.ok(main.includes('expectedBytes>0&&got!==expectedBytes'));
+  assert.ok(main.includes('hash.digest("hex")'));
+  assert.ok(main.includes('expectedSha.slice(7).toLowerCase()'));
+  assert.ok(main.includes("Download redirected outside the approved GitHub HTTPS hosts"));
+  assert.ok(main.includes('fs.renameSync(partial,dest)'));
 });
 check("every sidebar menu target maps to one existing view", () => {
   const html = fs.readFileSync(path.join(root, "app", "web", "index.html"), "utf8");
