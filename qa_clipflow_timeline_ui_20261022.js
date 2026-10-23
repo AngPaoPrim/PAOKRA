@@ -67,7 +67,7 @@ check("Normal queue remains randomized per cycle, not source-list order", () => 
   assert.match(body, /clip_flow_runtime\["normal_queue"\] = queue/);
 });
 check("AI Seam uses an exact directed pair and resumes destination B", () => {
-  assert.match(server, /find_cached_transition\(DATA, current_path, next_path, runtime_profile=seam_runtime_profile\)/);
+  assert.match(server, /find_cached_transition\(\s*DATA,\s*current_path,\s*next_path,\s*runtime_profile=seam_runtime_profile,\s*diagnostics=seam_lookup,\s*\)/);
   assert.match(server, /target_phase = "seam"/);
   assert.match(server, /seam_next_path=next_path/);
   assert.match(server, /elif phase == "seam":/);
@@ -317,5 +317,28 @@ check("Incompatible seam rows explain the actual backend reason", () => {
   assert.ok(source.includes("Output/FPS/สัดส่วนภาพ/Fit เปลี่ยน"));
   assert.ok(source.includes("ความละเอียด AI แบบ Manual เปลี่ยน"));
   assert.ok(source.includes("badge.title=String(seam.compatibility_reason||"));
+});
+check("Scene Builder loads Clip Flow OPEN as a preview without starting Engine", () => {
+  assert.match(source, /async function ensureClipFlowScenePreview\(\)/);
+  assert.match(source, /if\(view==="scenes"\)void ensureClipFlowScenePreview\(\)/);
+  assert.match(source, /post\("\/api\/source",\{source:open\}\)/);
+  assert.ok(source.includes("set Fit/Output before Auto Make Frames"));
+});
+check("Playlist Start preflights transition cache and repairs missing seams before playback", () => {
+  assert.match(source, /async function ensureClipFlowSeamsBeforeStart\(\)/);
+  assert.match(source, /if\(prefs\.mode==="playlist"\)await ensureClipFlowSeamsBeforeStart\(\)/);
+  assert.match(source, /await ensureClipFlowSeamsBeforeStart\(\);[\s\S]*?post\("\/api\/clip-flow\/start",\{\}\)/);
+  assert.match(source, /status\.settings\?\.enabled===true&&ready===pairs\.length/);
+  assert.match(source, /clipFlowAutoMakeFrames\(\{automatic:true\}\)/);
+  assert.ok(source.includes("ยกเลิก Start Engine เพราะเฟรมคั่นยังไม่พร้อม"));
+});
+check("Auto Make Frames returns a verified result to the Start gate", () => {
+  assert.match(source, /async function clipFlowAutoMakeFrames\(options=\{\}\)/);
+  assert.match(source, /if\(!built\)throw new Error/);
+  assert.match(source, /return false;/);
+});
+check("Virtual Camera is restored if seam preflight fails before Engine starts", () => {
+  assert.match(source, /clipFlowPreflightStoppedCamera&&!S\?\.running/);
+  assert.match(source, /คืนค่า Virtual Camera หลังยกเลิก\/ล้มเหลวไม่สำเร็จ/);
 });
 process.stdout.write("CLIPFLOW_TIMELINE_QA=" + passed.length + " PASS\n");

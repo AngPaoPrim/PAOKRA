@@ -361,6 +361,11 @@ _apply_cpu_threads()
 OUTPUT_PRESETS = {(720,1280),(1080,1920),(1280,720),(1920,1080)}
 FPS_PRESETS = {24,30,60}
 
+# Keep the last real camera-negotiated cadence while the camera is stopped for
+# AI Seam regeneration. Predicting source FPS alone is not enough on machines
+# whose OBS Virtual Camera driver falls back (for example, requested 60 -> 30).
+_AI_SEAM_NEGOTIATED_FPS_OVERRIDE = 0
+
 
 def _effective_output_fps(source_rate_hint=None, prefer_source_hint=False):
     """Resolve fixed FPS or an integer Auto rate, pinning an active camera's clock."""
@@ -2989,9 +2994,12 @@ def _clip_flow_controller():
                         transition_error = "คลิป Stop ที่รอเล่นหลังจบคลิปปัจจุบันหายไปหรือเปิดไม่ได้"
                     else:
                         stop_seam = None
+                        stop_lookup = {}
                         if phase in ("open", "normal"):
-                            stop_seam = find_cached_transition(DATA, current_path, next_path,
-                                                               runtime_profile=seam_runtime_profile)
+                            stop_seam = find_cached_transition(
+                                DATA, current_path, next_path,
+                                runtime_profile=seam_runtime_profile, diagnostics=stop_lookup,
+                            )
                         seam_asset = str(stop_seam.get("asset") or "") if stop_seam else ""
                         stop_resume = max(0.0, float(stop_seam.get("resume_seconds") or 0.0)) if stop_seam else 0.0
                         stop_duration = max(0.0, float(stop_seam.get("to_duration") or 0.0)) if stop_seam else 0.0
@@ -2999,6 +3007,10 @@ def _clip_flow_controller():
                             clip_flow_runtime["last_seam_lookup"] = {
                                 "from_path": current_path, "to_path": next_path,
                                 "found": bool(stop_seam), "target_role": "stop",
+                                "reason": str(stop_lookup.get("reason") or ("compatible directed bridge found" if stop_seam else "no compatible seam")),
+                                "bridge_fps": int(stop_lookup.get("bridge_fps") or 0),
+                                "runtime_fps": int(stop_lookup.get("runtime_fps") or (seam_runtime_profile or {}).get("fps") or 0),
+                                "runtime_fit": str(stop_lookup.get("runtime_fit") or (seam_runtime_profile or {}).get("fit") or ""),
                                 "checked_at": time.time(),
                                 "virtualcam_active": bool(vcam.active),
                                 "virtualcam_measured_fps": float(getattr(vcam, "measured_fps", 0.0) or 0.0),
@@ -3068,11 +3080,19 @@ def _clip_flow_controller():
                     if next_path:
                         # Only use a verified cache for this exact directed pair.
                         # Without one, keep the existing normal handoff unchanged.
-                        seam = find_cached_transition(DATA, current_path, next_path, runtime_profile=seam_runtime_profile)
+                        seam_lookup = {}
+                        seam = find_cached_transition(
+                            DATA, current_path, next_path,
+                            runtime_profile=seam_runtime_profile, diagnostics=seam_lookup,
+                        )
                         with clip_flow_lock:
                             clip_flow_runtime["last_seam_lookup"] = {
                                 "from_path": current_path, "to_path": next_path,
                                 "found": bool(seam), "target_role": "normal",
+                                "reason": str(seam_lookup.get("reason") or ("compatible directed bridge found" if seam else "no compatible seam")),
+                                "bridge_fps": int(seam_lookup.get("bridge_fps") or 0),
+                                "runtime_fps": int(seam_lookup.get("runtime_fps") or (seam_runtime_profile or {}).get("fps") or 0),
+                                "runtime_fit": str(seam_lookup.get("runtime_fit") or (seam_runtime_profile or {}).get("fit") or ""),
                                 "checked_at": time.time(),
                                 "profile": {
                                     "width": int((seam_runtime_profile or {}).get("width") or 0),
@@ -3154,7 +3174,7 @@ def _clip_flow_begin_open(reason="manual"):
 
 
 def _clip_flow_begin_open_impl(reason="manual"):
-    global clip_flow_eof_generation, clip_flow_restore_loop
+    global clip_flow_eof_generation, clip_flow_restore_loop, _AI_SEAM_NEGOTIATED_FPS_OVERRIDE
     if _ai_seam_batch_is_active():
         return {"ok": False, "error": "Auto Make Frames is running. Wait for the transition batch to finish before starting Clip Flow."}
     if _ai_seam_generation_active(DATA):
@@ -3217,27 +3237,17 @@ def _clip_flow_begin_open_impl(reason="manual"):
             source_rate_hint = float(source_fps or 30.0)
     out_fps = _effective_output_fps(source_rate_hint=source_rate_hint, prefer_source_hint=(fps_mode == "source"))
     camera_was_active = bool(vcam.active)
-    if camera_was_active and fps_mode == "source" and int(vcam.output_fps or 0) != out_fps:
-        # Negotiate Auto once at Flow start if another camera session used a different rate.
-        old_camera_fps = int(vcam.output_fps or 30)
-        _stop_libobs_bridge()
-        vcam.stop()
-        camera_ok = bool(vcam.start(out_w, out_h, out_fps, allow_fallback=(fps_mode == "source")))
-        if not camera_ok or not vcam.active:
-            new_error = str(vcam.error or "ไม่สามารถตั้ง FPS ตามคลิปได้")
-            restored = bool(vcam.start(out_w, out_h, old_camera_fps))
-            if restored and vcam.active:
-                _start_libobs_bridge(out_w, out_h, int(vcam.output_fps or old_camera_fps))
-            with lock:
-                state["virtualcam"] = bool(vcam.active)
-                state["virtualcam_error"] = new_error if not restored else None
-            detail = " คืนค่า FPS กล้องเดิมแล้ว" if restored else " และเปิดกล้องเดิมกลับไม่สำเร็จ"
-            return {"ok": False, "error": "เปิด Virtual Camera ที่ " + str(out_fps) + " FPS ไม่สำเร็จ: " + new_error + detail, "virtualcam": bool(vcam.active)}
-        _start_libobs_bridge(out_w, out_h, int(vcam.output_fps or out_fps))
+    if camera_was_active:
+        # If preflight has already negotiated a driver-supported cadence, keep it.
+        # Re-negotiating here could silently change FPS *after* the seam matrix was
+        # verified, which caused bridges to be skipped only on some PCs.
+        if fps_mode == "source":
+            out_fps = int(vcam.output_fps or out_fps)
+            _AI_SEAM_NEGOTIATED_FPS_OVERRIDE = out_fps
         with lock:
             state["virtualcam"] = True
             state["virtualcam_error"] = None
-    elif not vcam.active:
+    else:
         camera_ok = bool(vcam.start(out_w, out_h, out_fps, allow_fallback=(fps_mode == "source")))
         started_camera_here = camera_ok
         with lock:
@@ -3249,14 +3259,49 @@ def _clip_flow_begin_open_impl(reason="manual"):
                 "error": "เปิด Virtual Camera ไม่สำเร็จ: " + str(vcam.error or "ไม่พบอุปกรณ์ Virtual Camera"),
                 "virtualcam": False,
             }
-    else:
-        with lock:
-            state["virtualcam"] = True
-            state["virtualcam_error"] = None
+        _AI_SEAM_NEGOTIATED_FPS_OVERRIDE = int(vcam.output_fps or out_fps) if fps_mode == "source" else 0
 
     # Clip Flow uses the same libobs output stage as manual Virtual Camera start.
     if vcam.active:
         _start_libobs_bridge(out_w, out_h, int(vcam.output_fps or out_fps))
+
+    # The first matrix check ran before camera creation and therefore only knew the
+    # predicted FPS. Verify again against the actual device-negotiated profile so
+    # direct/API starts cannot silently degrade to hard cuts when this PC falls back.
+    try:
+        runtime_matrix = _ai_seam_validate_transition_matrix(DATA, seam_pairs)
+    except Exception as exc:
+        runtime_matrix = {"enabled": False, "missing": [], "error": str(exc)}
+        runtime_check_error = True
+    else:
+        runtime_check_error = False
+    if runtime_check_error or (runtime_matrix.get("enabled") and runtime_matrix.get("missing")):
+        missing = runtime_matrix.get("missing") or []
+        examples = "; ".join(
+            Path(str(item.get("from_path") or "")).name + " → " +
+            Path(str(item.get("to_path") or "")).name for item in missing[:4]
+        )
+        if started_camera_here:
+            try:
+                vcam.stop()
+                _stop_libobs_bridge()
+            except Exception:
+                pass
+            with lock:
+                state["virtualcam"] = bool(vcam.active)
+                state["virtualcam_error"] = vcam.error
+        return {
+            "ok": False,
+            "error": (
+                "AI Seam profile changed after Virtual Camera negotiation; playback was blocked to avoid hard cuts. "
+                + ("Runtime matrix check failed: " + str(runtime_matrix.get("error") or "unknown error")
+                   if runtime_check_error else
+                   "Compatible transitions: " + str(runtime_matrix.get("ready", 0)) + "/" +
+                   str(runtime_matrix.get("total", 0)) + ". Re-run Start preflight to rebuild for this PC. Missing: " + examples)
+            ),
+            "seam_matrix": runtime_matrix,
+            "virtualcam": bool(vcam.active),
+        }
     _ensure_clip_flow_controller()
     with clip_flow_lock:
         if not clip_flow_runtime.get("active"):
@@ -3469,6 +3514,7 @@ def clip_flow_get():
 
 @app.post("/api/clip-flow/config")
 def clip_flow_save_config():
+    global _AI_SEAM_NEGOTIATED_FPS_OVERRIDE
     if _ai_seam_batch_is_active():
         return jsonify(ok=False, error="Auto Make Frames กำลังทำงานอยู่ จึงล็อกการแก้ Playlist ชั่วคราวเพื่อให้ตรวจเฟรมได้ครบ"), 409
     body = request.get_json(silent=True)
@@ -3521,6 +3567,10 @@ def clip_flow_save_config():
             _persist_clip_config(current)
         except Exception as exc:
             return jsonify(ok=False, error=f"บันทึก Clip Flow ไม่สำเร็จ: {exc}"), 500
+    # If OPEN changes while the camera is stopped, discard the old Source-FPS
+    # hint; the next Start preflight will probe the new OPEN clip.
+    if "open" in body and not vcam.active:
+        _AI_SEAM_NEGOTIATED_FPS_OVERRIDE = 0
     return jsonify(**_clip_flow_public_state())
 
 
@@ -4030,6 +4080,7 @@ def system_hardware():
 
 @app.post("/api/settings")
 def settings():
+    global _AI_SEAM_NEGOTIATED_FPS_OVERRIDE
     body = request.get_json(silent=True)
     if body is None:
         body = {}
@@ -4227,6 +4278,10 @@ def settings():
                     PERF_FILE.write_text(json.dumps({k:state[k] for k in ("cpu_threads","decode_backend","render_backend")}, ensure_ascii=False, indent=2), encoding="utf-8")
                 except Exception:
                     pass
+    # A settings change may alter the camera modes advertised by the driver;
+    # force the next Start preflight to negotiate again instead of reusing stale FPS.
+    if any(key in body for key in ("width", "height", "fps", "fps_mode")):
+        _AI_SEAM_NEGOTIATED_FPS_OVERRIDE = 0
     return jsonify(ok=True, width=state["width"], height=state["height"], fps=state["fps"] )
 
 @app.post("/api/text")
@@ -5613,6 +5668,7 @@ def live_studio_control():
 
 @app.post("/api/virtualcam")
 def virtualcam_control():
+    global _AI_SEAM_NEGOTIATED_FPS_OVERRIDE
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return jsonify(ok=False, error="virtual camera payload must be an object"), 400
@@ -5650,12 +5706,28 @@ def virtualcam_control():
                     return jsonify(ok=False, error="camera FPS must be an integer from 1 to 120"), 400
                 fps = requested_fps
             else:
-                fps = _effective_output_fps()
+                source_rate_hint = None
+                # Start preflight negotiates FPS against the actual Clip Flow OPEN
+                # clip, not whichever unrelated source happens to be in Scene Builder.
+                if fps_mode == "source" and bool(body.get("seam_preflight")):
+                    try:
+                        planned = str(_clip_config_snapshot().get("open") or "").strip()
+                        if planned and Path(planned).is_file():
+                            source_rate_hint, _planned_duration = _probe_source_timing(
+                                planned, float(source_fps or 30.0)
+                            )
+                    except Exception:
+                        source_rate_hint = None
+                fps = _effective_output_fps(
+                    source_rate_hint=source_rate_hint,
+                    prefer_source_hint=bool(source_rate_hint),
+                )
             ok = bool(vcam.active) or bool(vcam.start(width, height, fps, allow_fallback=(fps_mode == "source")))
             bridge_ok = False
             if ok and vcam.active:
-                bridge_fps = int(vcam.output_fps or fps)
-                bridge_ok = _start_libobs_bridge(width, height, bridge_fps)
+                negotiated_fps = int(vcam.output_fps or fps)
+                _AI_SEAM_NEGOTIATED_FPS_OVERRIDE = negotiated_fps if fps_mode == "source" else 0
+                bridge_ok = _start_libobs_bridge(width, height, negotiated_fps)
             with lock:
                 state["virtualcam"] = bool(vcam.active)
                 state["virtualcam_error"] = vcam.error if not ok else None
@@ -6485,7 +6557,7 @@ def _ai_seam_runtime_profile():
     # While Flow is idle, predict that same OPEN-derived cadence. Once Flow is
     # active, _effective_output_fps() sees the camera's already-pinned cadence.
     if (profile.get("fps_mode") == "source" and planned_source
-            and not profile.get("flow_active")):
+            and not profile.get("flow_active") and not profile.get("virtualcam_active")):
         try:
             planned_rate, _planned_duration = _probe_source_timing(
                 planned_source, float(source_fps or profile.get("fps") or 30.0)
@@ -6498,6 +6570,17 @@ def _ai_seam_runtime_profile():
                 )
         except Exception:
             # Retain the existing detected FPS if OPEN's metadata is unavailable.
+            pass
+    # During Auto Make Frames the camera must be stopped. Preserve its most
+    # recently negotiated source-mode cadence so a per-PC driver fallback is
+    # reflected in generated seam files instead of silently invalidating them
+    # when playback starts again.
+    if profile.get("fps_mode") == "source" and not profile.get("virtualcam_active"):
+        try:
+            negotiated = int(_AI_SEAM_NEGOTIATED_FPS_OVERRIDE or 0)
+            if 1 <= negotiated <= 120:
+                profile["fps"] = negotiated
+        except (TypeError, ValueError, OverflowError):
             pass
     profile["box_source"] = planned_source
     profile["box_is_planned"] = False

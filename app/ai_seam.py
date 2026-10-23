@@ -1268,25 +1268,38 @@ class AiSeamService:
                                updated_at=time.time())
 
     def find_transition(self, from_path: str | Path, to_path: str | Path,
-                        runtime_profile: dict[str, Any] | None = None) -> dict[str, Any] | None:
+                        runtime_profile: dict[str, Any] | None = None,
+                        diagnostics: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        """Return a verified bridge for one directed pair and optionally explain misses."""
+        if diagnostics is not None:
+            diagnostics.clear()
+            diagnostics.update({"found": False, "from_path": str(from_path), "to_path": str(to_path)})
         with self.lock:
             if not bool(self.manifest["settings"].get("enabled")):
+                if diagnostics is not None:
+                    diagnostics["reason"] = "AI Seam is disabled in this installation"
                 return None
             seams = [dict(s) for s in self.manifest["seams"]]
         ka, kb = _path_key(from_path), _path_key(to_path)
+        matched_pair = False
+        last_reason = "directed pair is not present in this computer's AI Seam cache"
         for seam in reversed(seams):
             # Direction is part of the key: A -> B is never accepted as B -> A.
             if _path_key(seam.get("from_path", "")) != ka or _path_key(seam.get("to_path", "")) != kb:
                 continue
+            matched_pair = True
             try:
                 pa, pb = Path(seam["from_path"]), Path(seam["to_path"])
                 asset = self._safe_cache_asset(seam.get("asset"))
                 if asset is None or not pa.is_file() or not pb.is_file() or not asset.is_file():
+                    last_reason = "cache asset or one of the source clips is missing on this computer"
                     continue
                 if _file_signature(pa) != seam.get("from_signature") or _file_signature(pb) != seam.get("to_signature"):
+                    last_reason = "source clip file signature changed"
                     continue
                 current_settings = self._effective_settings()
                 if int(seam.get("frame_count") or 0) != int(current_settings.get("transition_frames") or 8):
+                    last_reason = "transition frame count differs from current AI Seam Settings"
                     continue
                 # Adaptive profiles vary by PC. A verified bridge remains usable
                 # across Auto-profile changes: only an explicit/manual input size
@@ -1294,29 +1307,48 @@ class AiSeamService:
                 # because another PC reports a different amount of VRAM.
                 if (str(seam.get("resolution_mode") or "manual") != "auto"
                         and int(seam.get("max_side") or 0) != int(current_settings.get("max_side") or 0)):
+                    last_reason = "manual AI input resolution differs from the generated bridge"
                     continue
                 # Version 2 uses interior-only interpolation; the earlier algorithm
                 # repeated A/B endpoints and could cause a held frame at handoff.
                 if seam.get("bridge_algorithm") != "interior-only-v2":
+                    last_reason = "cached bridge uses an older endpoint algorithm"
                     continue
+                current_fps = None
+                current_fit = None
+                cw = ch = 0
                 if runtime_profile is not None:
                     cw, ch, current_fit, current_fps, _duration = self._canvas_profile(
                         {"width": int(runtime_profile.get("box_width") or runtime_profile.get("width") or seam.get("width") or 720),
                          "height": int(runtime_profile.get("box_height") or runtime_profile.get("height") or seam.get("height") or 1280),
                          "duration": 0.0}, current_settings, profile_override=runtime_profile)
                     if int(seam.get("fps") or 0) != int(current_fps):
+                        last_reason = f"output FPS differs (bridge {int(seam.get('fps') or 0)} FPS; runtime {int(current_fps)} FPS)"
                         continue
                     if str(seam.get("fit") or "cover") != str(current_fit or "cover"):
+                        last_reason = f"Fit differs (bridge {seam.get('fit') or 'cover'}; runtime {current_fit or 'cover'})"
                         continue
                     # Resolution may scale between equal-aspect scene boxes without
-                    # distorting the generated bridge. Aspect, FPS, fit, and model
-                    # limit matter; exact pixel width/height does not.
+                    # distorting the generated bridge; exact pixel size is not required.
                     target_aspect = float(seam.get("target_aspect") or (float(seam.get("width") or 1) / max(1.0, float(seam.get("height") or 1))))
-                    if abs((float(cw) / max(1.0, float(ch))) - target_aspect) > 0.02:
+                    runtime_aspect = float(cw) / max(1.0, float(ch))
+                    if abs(runtime_aspect - target_aspect) > 0.02:
+                        last_reason = f"scene aspect differs (bridge {target_aspect:.4f}; runtime {runtime_aspect:.4f})"
                         continue
+                if diagnostics is not None:
+                    diagnostics.update({
+                        "found": True, "reason": "compatible directed bridge found",
+                        "bridge_fps": int(seam.get("fps") or 0),
+                        "runtime_fps": int(current_fps or (runtime_profile or {}).get("fps") or 0),
+                        "bridge_fit": str(seam.get("fit") or "cover"),
+                        "runtime_fit": str(current_fit or (runtime_profile or {}).get("fit") or "cover"),
+                        "bridge_asset": str(asset),
+                    })
                 return seam
-            except Exception:
-                continue
+            except Exception as exc:
+                last_reason = f"cache verification failed ({type(exc).__name__})"
+        if diagnostics is not None:
+            diagnostics["reason"] = last_reason if matched_pair else "directed pair is not present in this computer's AI Seam cache"
         return None
 
     def list_seams(self) -> list[dict[str, Any]]:
@@ -1795,13 +1827,24 @@ def create_blueprint(root: str | Path, data: str | Path,
 
 
 def find_cached_transition(data_root: str | Path, from_path: str | Path, to_path: str | Path,
-                           runtime_profile: dict[str, Any] | None = None) -> dict[str, Any] | None:
+                           runtime_profile: dict[str, Any] | None = None,
+                           diagnostics: dict[str, Any] | None = None) -> dict[str, Any] | None:
     key = str(Path(data_root).resolve())
     with _SERVICES_LOCK:
         service = _SERVICES.get(key)
     if service is None:
+        if diagnostics is not None:
+            diagnostics.clear()
+            diagnostics.update({
+                "found": False,
+                "from_path": str(from_path),
+                "to_path": str(to_path),
+                "reason": "AI Seam service is not registered in this process",
+            })
         return None
-    return service.find_transition(from_path, to_path, runtime_profile=runtime_profile)
+    return service.find_transition(
+        from_path, to_path, runtime_profile=runtime_profile, diagnostics=diagnostics
+    )
 
 
 def generation_active(data_root: str | Path) -> bool:

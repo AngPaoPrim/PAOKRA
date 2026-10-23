@@ -1,6 +1,6 @@
 {
   "name": "paokra-desktop",
-  "version": "1.4.6-fix-bug-beta",
+  "version": "1.4.7-seam-workflow-beta",
   "description": "PAOKRA Studio desktop application for video scenes, live console and virtual camera output",
   "repository": {
     "type": "git",

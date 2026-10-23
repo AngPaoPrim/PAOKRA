@@ -561,6 +561,35 @@ function aiSeamWatchJob(jobId){
 }
 
 /* ---------- views ---------- */
+let clipFlowScenePreviewStarting=false;
+async function ensureClipFlowScenePreview(){
+  if(clipFlowScenePreviewStarting||view!=="scenes")return;
+  if(!S){try{await poll()}catch{}}
+  if(view!=="scenes"||S?.running||clipFlowRuntime?.active)return;
+  const current=String(S?.source||"").trim();
+  if(current){
+    try{
+      const existing=await fetch("/source-media",{method:"HEAD",cache:"no-store"});
+      if(existing.ok)return;
+    }catch{}
+  }
+  clipFlowScenePreviewStarting=true;
+  try{
+    const flow=await api("/api/clip-flow");
+    const open=String(flow.config?.open||"").trim();
+    if(!open)return;
+    if(S?.running||clipFlowRuntime?.active||view!=="scenes")return;
+    const r=await post("/api/source",{source:open});
+    if(r?.ok===false)throw new Error(r.error||"โหลดคลิป Open เป็น Preview ไม่สำเร็จ");
+    await poll();
+    log("INFO","Loaded Clip Flow OPEN as a stopped Scene Builder preview; set Fit/Output before Auto Make Frames.");
+    notify("โหลดคลิป Open เป็นภาพ Preview แล้ว — ตั้ง Fit/Output ก่อน Auto Make Frames ได้เลย");
+  }catch(e){
+    log("WARN","Scene Builder preview auto-load skipped: "+e.message);
+  }finally{
+    clipFlowScenePreviewStarting=false;
+  }
+}
 function go(){
   const requested=location.hash.slice(1);
   if(requested==="ai"&&!UI_CFG.aiMode){location.hash="#dashboard";return}
@@ -578,6 +607,7 @@ function go(){
   if(view==="comments")loadComments(true);
   if(view==="logs")renderLogs();
   render();layout();
+  if(view==="scenes")void ensureClipFlowScenePreview();
 }
 function streams(force){
   const windowActive=!document.hidden&&document.hasFocus();
@@ -2091,7 +2121,7 @@ $("#clearImg").addEventListener("click",async()=>{
 });
 
 /* ---------- controls ---------- */
-let engineActionBusy=false,cameraActionBusy=false;
+let engineActionBusy=false,cameraActionBusy=false,clipFlowPreflightStoppedCamera=false,clipFlowPreflightStartedCamera=false;
 async function stopEnginePlayback(){
   if(engineActionBusy)return;
   engineActionBusy=true;render();
@@ -2158,15 +2188,35 @@ async function startEnginePlayback(){
       try{
         if(cameraWasActive&&changed){await post("/api/virtualcam",{action:"reconfigure-stop"});cameraStopped=true}
         if(changed)await post("/api/settings",outputPatch);
-        if(cameraStopped){const restarted=await post("/api/virtualcam",{action:"start"});if(!restarted?.active)throw new Error(restarted?.error||"Virtual Camera เริ่มใหม่หลังเปลี่ยน Output ไม่สำเร็จ")}
+        if(cameraStopped&&prefs.mode!=="playlist"){const restarted=await post("/api/virtualcam",{action:"start"});if(!restarted?.active)throw new Error(restarted?.error||"Virtual Camera เริ่มใหม่หลังเปลี่ยน Output ไม่สำเร็จ");cameraStopped=false}
+        else if(cameraStopped){clipFlowPreflightStoppedCamera=true;cameraStopped=false}
       }catch(e){if(cameraStopped){try{await post("/api/virtualcam",{action:"start"})}catch{}}throw e}
       await poll();
+      if(prefs.mode==="playlist")await ensureClipFlowSeamsBeforeStart();
     }
     await post("/api/control",{action:"start",...(!S?.running?{playback_mode:prefs.mode}:{})});
+    clipFlowPreflightStoppedCamera=false;
+    clipFlowPreflightStartedCamera=false;
     await Promise.all([poll(),loadClipFlow(true,false)]);
     const pv=$("#stageBgVideo");if(pv&&S?.source_enabled)pv.play().catch(()=>{});
     notify(prefs.mode==="playlist"?"เริ่ม Playlist: Open → Normal แล้ว":"เริ่ม Engine สำหรับ Source ปัจจุบันแล้ว");
-  }catch(e){notify("เริ่ม Engine ไม่สำเร็จ: "+e.message,false)}
+  }catch(e){
+    notify("เริ่ม Engine ไม่สำเร็จ: "+e.message,false);
+    try{await poll()}catch{}
+    if(clipFlowPreflightStoppedCamera&&!S?.running){
+      try{
+        const restored=await post("/api/virtualcam",{action:"start",seam_preflight:true});
+        if(restored?.active){clipFlowPreflightStoppedCamera=false;clipFlowPreflightStartedCamera=false}
+        await poll();
+      }catch(restoreError){notify("คืนค่า Virtual Camera หลังยกเลิก/ล้มเหลวไม่สำเร็จ: "+restoreError.message,false)}
+    }else if(clipFlowPreflightStartedCamera&&!S?.running){
+      try{
+        const current=await api("/api/ai-seam/status");
+        if(current.virtualcam_active)await post("/api/virtualcam",{action:"stop"});
+      }catch(cleanupError){notify("ปิด Virtual Camera หลังยกเลิก Start ไม่สำเร็จ: "+cleanupError.message,false)}
+      finally{clipFlowPreflightStartedCamera=false;await poll()}
+    }
+  }
   finally{engineActionBusy=false;await Promise.all([poll(),loadClipFlow(true,false)]);renderClipFlow()}
 }
 $("#bStart")?.addEventListener("click",startEnginePlayback);
@@ -2454,9 +2504,16 @@ function renderClipFlow(){
   const rt=$("#clipFlowRuntime");
   if(rt){
     const current=clipFlowRuntime.current_clip?clipBaseName(clipFlowRuntime.current_clip):"-";
+    const lookup=clipFlowRuntime.last_seam_lookup;
+    const seamDiag=lookup?
+      ("AI Seam "+(lookup.found?"used":"not used")+" · "+clipBaseName(lookup.from_path)+" → "+clipBaseName(lookup.to_path)+
+       " · "+String(lookup.reason||"no backend reason")+
+       (lookup.bridge_fps||lookup.runtime_fps?(" · FPS "+(lookup.bridge_fps||"?")+"/"+(lookup.runtime_fps||"?")):"")):"";
     rt.textContent=(clipFlowRuntime.active?"RUNNING":"STOPPED")+" · "+(labels[phase]||phase)+" · current: "+current+
       " · Normal queue remaining: "+(Number(clipFlowRuntime.normal_queue_remaining)||0)+
-      " · played this cycle: "+(Number(clipFlowRuntime.played_in_cycle)||0)+(clipFlowRuntime.stop_requested?" · Stop queued: current clip will finish first":"");
+      " · played this cycle: "+(Number(clipFlowRuntime.played_in_cycle)||0)+(clipFlowRuntime.stop_requested?" · Stop queued: current clip will finish first":"")+
+      (seamDiag?" · "+seamDiag:"");
+    rt.title=seamDiag||"ยังไม่มีการตรวจรอยต่อในรอบนี้";
   }
   if(clipFlowRuntime.last_error)clipFlowMessage(clipFlowRuntime.last_error,true);
   const timeline=$("#clipFlowSeek"),time=$("#clipFlowTime"),remaining=$("#clipFlowRemaining"),fpsInfo=$("#clipFlowFps");
@@ -2699,8 +2756,9 @@ function renderClipFlowSeams(){
     const more=document.createElement("div");more.className="muted small";more.textContent="แสดง "+shown.length+" จากทั้งหมด "+pairs.length+" คู่";list.appendChild(more);
   }
 }
-async function clipFlowAutoMakeFrames(){
-  if(clipFlowAutoMaking)return;
+async function clipFlowAutoMakeFrames(options={}){
+  if(clipFlowAutoMaking)return false;
+  const automatic=!!(options&&typeof options==="object"&&options.automatic);
   if(clipFlowRuntime.active){clipFlowMessage("กรุณาหยุด Clip Flow ก่อนสร้าง AI Seam",true);return}
   clipFlowAutoMaking=true;renderClipFlowSeams();
   const button=$("#clipFlowAutoMake"),status=$("#clipFlowSeamStatus");
@@ -2712,14 +2770,14 @@ async function clipFlowAutoMakeFrames(){
     clipFlowRuntime=flow.runtime||clipFlowRuntime;renderClipFlowSeams();
     const allPairs=clipFlowPlayablePairs(clipFlowConfig);
     if(!allPairs.length)throw new Error("ตั้งค่าอย่างน้อยหนึ่งคลิป Normal และกำหนด Open/Stop ตามการใช้งานจริงก่อน Auto Make Frames");
-    if(allPairs.length>250){const ok=confirm("ต้องสร้างเฟรมคั่น "+allPairs.length+" คู่แบบมีทิศทาง งานอาจใช้เวลานาน แต่จะไม่ตัดคู่ที่ Playlist สามารถเล่นได้ ต้องการทำต่อหรือไม่?");if(!ok){setStatus("ยกเลิกโดยผู้ใช้ — ยังไม่ได้สร้างเฟรม");return}}
+    if(allPairs.length>250){const ok=confirm("ต้องสร้างเฟรมคั่น "+allPairs.length+" คู่แบบมีทิศทาง งานอาจใช้เวลานาน แต่จะไม่ตัดคู่ที่ Playlist สามารถเล่นได้ ต้องการทำต่อหรือไม่?");if(!ok){setStatus("ยกเลิกโดยผู้ใช้ — ยังไม่ได้สร้างเฟรม");return false}}
     const health=await api("/api/ai-seam/status");
     if(health.clip_flow_active||health.engine_running||health.virtualcam_active||health.generation_busy)throw new Error("ปิด Engine และ Virtual Camera แล้วหยุด Clip Flow ก่อน Auto Make Frames เพื่อไม่ให้กระทบ LIVE/FPS");
     const reservation=await post("/api/ai-seam/batch-lock",{action:"acquire"});
     batchToken=String(reservation.token||"");
     if(!batchToken)throw new Error(reservation.error||"ไม่ได้รับสิทธิ์ล็อก Engine ระหว่าง Auto Make Frames");
     lastBatchHeartbeat=Date.now();
-    setStatus("กำลังซิงก์ Open / Normal / Stop กับ AI Seam Studio…");
+    setStatus(automatic?"กำลังเตรียมเฟรมก่อน Start Engine — ซิงก์ Open / Normal / Stop…":"กำลังซิงก์ Open / Normal / Stop กับ AI Seam Studio…");
     const paths=[],seen=new Set();
     for(const raw of [clipFlowConfig.open,...clipFlowConfig.normal,clipFlowConfig.stop]){const p=String(raw||"").trim(),k=clipFlowPathKey(p);if(p&&k&&!seen.has(k)){seen.add(k);paths.push(p)}}
     const synced=await post("/api/ai-seam/clips",{paths,batch_token:batchToken});
@@ -2738,7 +2796,7 @@ async function clipFlowAutoMakeFrames(){
     if(!todo.length){
       if(statusResult.settings?.enabled!==true){const enabled=await post("/api/ai-seam/settings",{enabled:true,batch_token:batchToken});if(!enabled.ok||enabled.settings?.enabled!==true)throw new Error(enabled.error||"เปิด AI Seam ไม่สำเร็จ")}
       setStatus("เฟรมคั่นครบแล้ว "+mappedPairs.length+"/"+mappedPairs.length+" คู่ที่ Playlist ใช้งานได้จริง — Open/Normal/Stop ครอบคลุมครบ");
-      notify("AI Seam: เฟรมคั่นครบทุกเส้นทางของ Playlist แล้ว");return;
+      notify("AI Seam: เฟรมคั่นครบทุกเส้นทางของ Playlist แล้ว");return true;
     }
     setStatus("เริ่ม Auto Make Frames · สร้าง "+todo.length+" คู่ที่ขาดจาก "+mappedPairs.length+" คู่ที่ใช้งานได้จริง");
     for(let i=0;i<todo.length;i++){
@@ -2780,10 +2838,12 @@ async function clipFlowAutoMakeFrames(){
     await aiSeamLoad(true);
     setStatus("เสร็จแล้ว: เฟรมคั่นพร้อมใช้ "+finalReady+"/"+finalPairs.length+" คู่ · Open → Normal/Stop, Normal ↔ Normal และ Normal → Stop ครบ");
     notify("Auto Make Frames เสร็จแล้ว "+finalReady+"/"+finalPairs.length+" คู่ที่ Playlist เล่นได้จริง");
+    return true;
   }catch(e){
     setStatus("หยุดสร้างเฟรมคั่น: "+e.message);
     clipFlowMessage("Auto Make Frames ไม่สำเร็จ: "+e.message,true);
     notify(e.message,false);
+    return false;
   }finally{
     if(batchToken){
       try{await post("/api/ai-seam/batch-lock",{action:"release",token:batchToken})}
@@ -2796,6 +2856,60 @@ async function clipFlowAutoMakeFrames(){
   }
 }
 $("#clipFlowAutoMake")?.addEventListener("click",clipFlowAutoMakeFrames);
+
+async function ensureClipFlowSeamsBeforeStart(){
+  const pairs=clipFlowPlayablePairs(clipFlowConfig);
+  if(!pairs.length)throw new Error("ยังไม่มีคู่เฟรมคั่นที่ Playlist ใช้งานได้ กรุณาตั้ง Open และ Normal ก่อน");
+  let status=await api("/api/ai-seam/status");
+  if(status.engine_running||status.clip_flow_active)throw new Error("หยุด Engine/Clip Flow ก่อนตรวจโปรไฟล์เฟรมคั่น");
+  const cameraWasActive=!!status.virtualcam_active;
+  // Negotiate the real output mode before deciding which bridge cache is valid.
+  // In Source FPS mode the target must come from Clip Flow OPEN; this PC's driver
+  // may fall back to a different cadence than the source metadata requests.
+  if(!cameraWasActive){
+    const negotiated=await post("/api/virtualcam",{action:"start",seam_preflight:true});
+    if(!negotiated?.active)throw new Error(negotiated?.error||"ไม่สามารถตรวจสอบ FPS จริงของ Virtual Camera ได้");
+    clipFlowPreflightStartedCamera=true;
+    await poll();
+    status=await api("/api/ai-seam/status");
+  }
+  await loadClipFlowSeams({attempts:4});
+  status=await api("/api/ai-seam/status");
+  const ready=pairs.filter(p=>clipFlowHasCachedSeam(p.from,p.to)).length;
+  if(status.settings?.enabled===true&&ready===pairs.length)return true;
+  const enabled=status.settings?.enabled===true;
+  const accepted=confirm(
+    "เฟรมคั่นยังไม่พร้อมสำหรับ Playlist ("+ready+"/"+pairs.length+" คู่, AI Seam "+(enabled?"เปิด":"ปิด")+").\n\n"+
+    "กด OK เพื่อสร้าง/ซ่อมเฉพาะคู่ที่ขาดและเปิด AI Seam ก่อนเริ่ม Engine ระบบจะตรวจตาม Output/FPS/Fit ของเครื่องนี้\n"+
+    "หาก Virtual Camera เปิดอยู่ ระบบจะหยุดชั่วคราวระหว่างสร้างเฟรม แล้วให้ Engine เปิดใหม่เมื่อเริ่มเล่น\n\n"+
+    "Cancel = ยกเลิก Start เพื่อป้องกันการเล่นแบบตัดฉับ/วาปโดยไม่ตั้งใจ"
+  );
+  if(!accepted){
+    if(clipFlowPreflightStartedCamera){
+      try{await post("/api/virtualcam",{action:"stop"});await poll()}catch{}
+      clipFlowPreflightStartedCamera=false;
+    }
+    throw new Error("ยกเลิก Start Engine เพราะเฟรมคั่นยังไม่พร้อม ระบบไม่ได้เริ่ม Playlist");
+  }
+  if(status.engine_running||status.clip_flow_active)throw new Error("หยุด Engine/Clip Flow ก่อนเตรียมเฟรมคั่น");
+  if(status.virtualcam_active){
+    const stopped=await post("/api/virtualcam",{action:"stop"});
+    if(stopped?.ok===false)throw new Error(stopped.error||"หยุด Virtual Camera ชั่วคราวไม่สำเร็จ");
+    if(cameraWasActive)clipFlowPreflightStoppedCamera=true;
+    await poll();
+  }
+  const built=await clipFlowAutoMakeFrames({automatic:true});
+  if(!built)throw new Error("เตรียมเฟรมคั่นไม่สำเร็จ จึงไม่เริ่ม Engine เพื่อป้องกันรอยต่อวาป");
+  await loadClipFlowSeams({attempts:4});
+  status=await api("/api/ai-seam/status");
+  const finalPairs=clipFlowPlayablePairs(clipFlowConfig);
+  const finalReady=finalPairs.filter(p=>clipFlowHasCachedSeam(p.from,p.to)).length;
+  if(status.settings?.enabled!==true||finalReady!==finalPairs.length){
+    throw new Error("ตรวจสอบหลังสร้างไม่ผ่าน: เฟรมคั่นพร้อม "+finalReady+"/"+finalPairs.length+" คู่; Engine ยังไม่เริ่ม");
+  }
+  return true;
+}
+
 $("#clipFlowPickOpen")?.addEventListener("click",()=>chooseClipFiles("open"));
 $("#clipFlowAddNormal")?.addEventListener("click",()=>chooseClipFiles("normal"));
 $("#clipFlowPickStop")?.addEventListener("click",()=>chooseClipFiles("stop"));
@@ -2823,8 +2937,11 @@ $("#clipFlowStart")?.addEventListener("click",async()=>{
   renderClipFlow();
   try{
     if(!clipFlowConfig.enabled)await saveClipFlow({enabled:true},"เปิด Auto Clip Flow แล้ว");
+    await ensureClipFlowSeamsBeforeStart();
     const r=await post("/api/clip-flow/start",{});
     if(!r?.ok)throw new Error(r?.error||"Backend ปฏิเสธคำสั่งเริ่ม Flow");
+    clipFlowPreflightStoppedCamera=false;
+    clipFlowPreflightStartedCamera=false;
     // Reflect the accepted transition immediately; the following ordered GET
     // will fill in the full queue/status. Do not keep showing the previous Stop.
     clipFlowUiIdentity="";clipFlowUiPosition=0;clipFlowUiAt=performance.now();
@@ -2838,6 +2955,19 @@ $("#clipFlowStart")?.addEventListener("click",async()=>{
   }catch(e){
     clipFlowMessage("เริ่ม Flow ไม่สำเร็จ: "+e.message,true);
     notify(e.message,false);
+    try{await poll()}catch{}
+    if(clipFlowPreflightStoppedCamera&&!S?.running){
+      try{
+        const restored=await post("/api/virtualcam",{action:"start",seam_preflight:true});
+        if(restored?.active){clipFlowPreflightStoppedCamera=false;clipFlowPreflightStartedCamera=false}
+      }catch(restoreError){notify("คืนค่า Virtual Camera หลังยกเลิก/ล้มเหลวไม่สำเร็จ: "+restoreError.message,false)}
+    }else if(clipFlowPreflightStartedCamera&&!S?.running){
+      try{
+        const current=await api("/api/ai-seam/status");
+        if(current.virtualcam_active)await post("/api/virtualcam",{action:"stop"});
+      }catch(cleanupError){notify("ปิด Virtual Camera หลังยกเลิก Start ไม่สำเร็จ: "+cleanupError.message,false)}
+      finally{clipFlowPreflightStartedCamera=false;await poll()}
+    }
     await loadClipFlow(true);
   }finally{
     clipFlowActionBusy=false;
