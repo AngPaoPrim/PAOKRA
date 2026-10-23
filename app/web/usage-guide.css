@@ -1,0 +1,47 @@
+/* PAOKRA Studio v1.4.9 — isolated user guide overlay */
+#pkGuideOverlay{position:fixed;inset:0;z-index:10050;display:grid;place-items:center;padding:18px;background:rgba(5,7,16,.72);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);opacity:0;visibility:hidden;transition:opacity .22s ease,visibility .22s ease}
+#pkGuideOverlay.pk-guide-open{opacity:1;visibility:visible}
+#pkGuideDialog{width:min(1040px,96vw);height:min(760px,92vh);display:grid;grid-template-rows:auto minmax(0,1fr);overflow:hidden;border:1px solid rgba(var(--acc-rgb,124 108 255)/.36);border-radius:24px;background:var(--panel, #111522);color:var(--text, #edf0fb);box-shadow:0 32px 100px rgba(0,0,0,.48),0 0 70px rgba(var(--acc-rgb,124 108 255)/.12);transform:translateY(12px) scale(.985);transition:transform .24s ease}
+#pkGuideOverlay.pk-guide-open #pkGuideDialog{transform:none}
+.pk-guide-head{display:flex;align-items:center;gap:16px;padding:22px 24px;background:radial-gradient(80% 180% at 0 0,rgba(var(--acc-rgb,124 108 255)/.24),transparent 65%),var(--card-bg,rgba(255,255,255,.025));border-bottom:1px solid var(--border,rgba(255,255,255,.09))}
+.pk-guide-brand{display:flex;align-items:center;gap:13px;min-width:0;flex:1}
+.pk-guide-mark{width:48px;height:48px;flex:0 0 48px;display:grid;place-items:center;border-radius:15px;background:linear-gradient(135deg,var(--acc,#7c6cff),#ff8a3d);font-size:24px;box-shadow:0 8px 24px rgba(var(--acc-rgb,124 108 255)/.3)}
+.pk-guide-head h2{margin:0;font-size:20px;letter-spacing:-.02em}
+.pk-guide-head p{margin:4px 0 0;color:var(--muted,#a4acc0);font-size:12px}
+.pk-guide-close{width:38px;height:38px;border:1px solid var(--border,rgba(255,255,255,.12));border-radius:12px;background:transparent;color:inherit;font-size:23px;cursor:pointer}
+.pk-guide-close:hover{background:rgba(var(--acc-rgb,124 108 255)/.16)}
+.pk-guide-body{display:grid;grid-template-columns:225px minmax(0,1fr);min-height:0}
+.pk-guide-nav{padding:14px;overflow:auto;border-right:1px solid var(--border,rgba(255,255,255,.09));background:rgba(127,127,127,.035)}
+.pk-guide-tab{width:100%;display:flex;align-items:center;gap:10px;padding:11px 12px;margin:3px 0;border:1px solid transparent;border-radius:12px;background:transparent;color:inherit;text-align:left;font:inherit;font-size:13px;cursor:pointer;transition:background .15s,border-color .15s}
+.pk-guide-tab span:first-child{width:24px;text-align:center;font-size:17px}
+.pk-guide-tab:hover{background:rgba(var(--acc-rgb,124 108 255)/.08)}
+.pk-guide-tab[aria-selected=true]{background:rgba(var(--acc-rgb,124 108 255)/.16);border-color:rgba(var(--acc-rgb,124 108 255)/.36);font-weight:700}
+.pk-guide-content{padding:26px clamp(18px,3vw,34px);overflow:auto;scroll-behavior:smooth}
+.pk-guide-page{display:none;animation:pkGuideIn .18s ease}
+.pk-guide-page.pk-guide-active{display:block}
+@keyframes pkGuideIn{from{opacity:.3;transform:translateY(4px)}to{opacity:1;transform:none}}
+.pk-guide-eyebrow{font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:var(--acc,#7c6cff)}
+.pk-guide-page h3{margin:8px 0 10px;font-size:24px;letter-spacing:-.025em}
+.pk-guide-page>p{color:var(--muted,#a4acc0);line-height:1.75;font-size:13px}
+.pk-guide-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:18px 0}
+.pk-guide-card{padding:15px 16px;border:1px solid var(--border,rgba(255,255,255,.1));border-radius:15px;background:var(--card-bg,rgba(255,255,255,.025))}
+.pk-guide-card h4{margin:0 0 7px;font-size:14px}
+.pk-guide-card p,.pk-guide-card li{font-size:12.5px;line-height:1.7;color:var(--muted,#a4acc0)}
+.pk-guide-card p{margin:0}
+.pk-guide-card ul,.pk-guide-card ol{padding-left:19px;margin:8px 0 0}
+.pk-guide-callout{margin:16px 0;padding:13px 15px;border-left:3px solid var(--acc,#7c6cff);border-radius:0 12px 12px 0;background:rgba(var(--acc-rgb,124 108 255)/.09);font-size:12.5px;line-height:1.7}
+.pk-guide-steps{counter-reset:guide;list-style:none;padding:0;margin:18px 0}
+.pk-guide-steps li{counter-increment:guide;position:relative;padding:0 0 16px 43px;font-size:13px;line-height:1.7;color:var(--muted,#a4acc0)}
+.pk-guide-steps li:before{content:counter(guide);position:absolute;left:0;top:0;width:28px;height:28px;display:grid;place-items:center;border-radius:9px;background:rgba(var(--acc-rgb,124 108 255)/.18);color:var(--acc,#7c6cff);font-weight:800}
+.pk-guide-foot{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:14px 22px;border-top:1px solid var(--border,rgba(255,255,255,.09));background:var(--card-bg,rgba(255,255,255,.025))}
+.pk-guide-foot label{display:flex;align-items:center;gap:8px;flex:1;font-size:12px;color:var(--muted,#a4acc0);cursor:pointer}
+.pk-guide-foot input{accent-color:var(--acc,#7c6cff)}
+.pk-guide-btn{border:1px solid rgba(var(--acc-rgb,124 108 255)/.35);border-radius:10px;padding:9px 13px;background:rgba(var(--acc-rgb,124 108 255)/.13);color:inherit;font:inherit;font-size:12px;font-weight:700;cursor:pointer}
+.pk-guide-btn.primary{background:var(--acc,#7c6cff);color:var(--on-acc,#fff);border-color:transparent}
+.pk-guide-inline{display:inline-flex;align-items:center;gap:7px;margin:10px 0 4px}
+.pk-guide-inline button{font:inherit;cursor:pointer}
+.pk-guide-easter{font-size:12px;letter-spacing:.04em;color:#ffad66}
+html[data-bg=halloween] body{background-image:radial-gradient(ellipse at 12% 6%,rgba(255,111,35,.14),transparent 35%),radial-gradient(ellipse at 88% 22%,rgba(151,71,255,.14),transparent 36%)}
+html[data-bg=halloween] .pkb-aur{background:radial-gradient(48% 42% at 18% 12%,rgba(255,116,38,.32),transparent 62%),radial-gradient(40% 40% at 88% 92%,rgba(151,71,255,.25),transparent 62%)}
+@media(max-width:700px){#pkGuideOverlay{padding:6px}#pkGuideDialog{width:100%;height:96vh;border-radius:17px}.pk-guide-head{padding:14px}.pk-guide-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.pk-guide-nav{display:flex;gap:5px;padding:8px;overflow-x:auto;border-right:0;border-bottom:1px solid var(--border,rgba(255,255,255,.09))}.pk-guide-tab{width:auto;flex:0 0 auto;margin:0;padding:9px 10px}.pk-guide-tab span:last-child{white-space:nowrap}.pk-guide-content{padding:18px 15px}.pk-guide-grid{grid-template-columns:1fr}.pk-guide-head h2{font-size:17px}.pk-guide-foot{padding:10px 12px}}
+@media(prefers-reduced-motion:reduce){#pkGuideOverlay,#pkGuideDialog,.pk-guide-page{transition:none;animation:none}}

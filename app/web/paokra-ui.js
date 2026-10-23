@@ -38,6 +38,7 @@ const PRESETS=[
   {id:"graphite",n:"Graphite",sw:"linear-gradient(135deg,#1b2030,#0b0d14)",pa:"#4f8cff",c:{theme:"dark",accent:"blue",bg:"solid",card:"outline",glass:false}},
   {id:"forest",n:"Forest",sw:"linear-gradient(135deg,#0c3326,#080b14)",pa:"#2dd4a0",c:{theme:"dark",accent:"emerald",bg:"soft",card:"elevated",glass:true}},
   {id:"sunset",n:"Sunset",sw:"linear-gradient(135deg,#40200e,#0d0a10)",pa:"#ff8a3d",c:{theme:"dark",accent:"orange",bg:"aurora",card:"elevated",glass:true}},
+  {id:"halloween",n:"🎃 Halloween",sw:"linear-gradient(135deg,#ff7a24 0%,#6d28d9 52%,#111020 100%)",pa:"#ff8a3d",c:{theme:"dark",accent:"orange",bg:"halloween",card:"elevated",glass:true}},
   {id:"sakura",n:"Sakura",sw:"linear-gradient(135deg,#ffe3ec,#f5f0f6)",pa:"#ff5c8a",c:{theme:"light",accent:"rose",bg:"soft",card:"elevated",glass:true}},
   {id:"paper",n:"Paper",sw:"linear-gradient(135deg,#ffffff,#e9edf5)",pa:"#4f8cff",c:{theme:"light",accent:"blue",bg:"solid",card:"elevated",glass:false}}
 ];
