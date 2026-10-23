@@ -10,3 +10,8 @@
 ## Safety / scope
 - The guide is an isolated frontend module and does not alter playback, seam generation, Virtual Camera, backend, or updater logic.
 - Existing 1.4.8 seam and updater behavior remains unchanged.
+
+## Halloween polish and OOMSIN Easter egg
+- Added a subtle Halloween atmosphere to the guide overlay with warm pumpkin-orange accents, violet ambient lighting, and responsive decorative details.
+- Added a small OOMSIN thank-you Easter egg in the guide only; it does not change application workflows or settings.
+- Added a focused QA script for the Easter egg and packaged guide asset integrity.

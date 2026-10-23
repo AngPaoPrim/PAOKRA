@@ -45,3 +45,14 @@ html[data-bg=halloween] body{background-image:radial-gradient(ellipse at 12% 6%,
 html[data-bg=halloween] .pkb-aur{background:radial-gradient(48% 42% at 18% 12%,rgba(255,116,38,.32),transparent 62%),radial-gradient(40% 40% at 88% 92%,rgba(151,71,255,.25),transparent 62%)}
 @media(max-width:700px){#pkGuideOverlay{padding:6px}#pkGuideDialog{width:100%;height:96vh;border-radius:17px}.pk-guide-head{padding:14px}.pk-guide-body{grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.pk-guide-nav{display:flex;gap:5px;padding:8px;overflow-x:auto;border-right:0;border-bottom:1px solid var(--border,rgba(255,255,255,.09))}.pk-guide-tab{width:auto;flex:0 0 auto;margin:0;padding:9px 10px}.pk-guide-tab span:last-child{white-space:nowrap}.pk-guide-content{padding:18px 15px}.pk-guide-grid{grid-template-columns:1fr}.pk-guide-head h2{font-size:17px}.pk-guide-foot{padding:10px 12px}}
 @media(prefers-reduced-motion:reduce){#pkGuideOverlay,#pkGuideDialog,.pk-guide-page{transition:none;animation:none}}
+
+/* v1.4.9 Halloween polish: atmospheric accents, scoped strictly to the guide overlay. */
+#pkGuideOverlay.pk-guide-open{background:radial-gradient(ellipse at 12% 8%,rgba(255,117,24,.17),transparent 38%),radial-gradient(ellipse at 88% 90%,rgba(128,57,190,.17),transparent 42%),rgba(5,7,16,.78)}
+#pkGuideDialog{position:relative;isolation:isolate;overflow:hidden;border:1px solid rgba(255,153,61,.28);box-shadow:0 28px 100px rgba(0,0,0,.58),0 0 0 1px rgba(255,255,255,.035),0 0 46px rgba(255,111,20,.10)}
+#pkGuideDialog:before{content:'✦  🎃  ✦';position:absolute;top:10px;right:20px;z-index:0;pointer-events:none;color:rgba(255,157,70,.48);font-size:15px;letter-spacing:9px;text-shadow:0 0 18px rgba(255,120,30,.45)}
+#pkGuideDialog .pk-guide-oomsin{position:absolute;right:16px;bottom:10px;z-index:5;display:flex;align-items:center;gap:7px;padding:6px 11px;border:1px solid rgba(255,151,69,.22);border-radius:999px;background:rgba(20,13,28,.88);color:#d7c8d9;font-size:10px;letter-spacing:.025em;box-shadow:0 5px 22px rgba(0,0,0,.2);pointer-events:none}
+#pkGuideDialog .pk-guide-oomsin strong{color:#ffb16c;font-weight:800;letter-spacing:.12em;text-shadow:0 0 12px rgba(255,132,40,.38)}
+#pkGuideDialog .pk-guide-oomsin-star{color:#ffc17a;font-size:13px}
+#pkGuideDialog .pk-guide-oomsin-pumpkin{font-size:13px}
+@media(max-width:640px){#pkGuideDialog .pk-guide-oomsin{right:8px;bottom:7px;font-size:9px;padding:5px 8px;gap:4px}#pkGuideDialog:before{right:10px;letter-spacing:4px}}
+@media(prefers-reduced-motion:no-preference){#pkGuideDialog .pk-guide-oomsin-star{animation:pkGuideStarPulse 3.2s ease-in-out infinite}@keyframes pkGuideStarPulse{0%,100%{opacity:.7;transform:scale(.95)}50%{opacity:1;transform:scale(1.12)}}}

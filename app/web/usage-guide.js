@@ -71,3 +71,18 @@ function init(){
 if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",init,{once:true});else init();
 window.PAOKRAUsageGuide={open:open};
 })();
+/* v1.4.9 Easter egg: a small thank-you to OOMSIN, kept inside the guide only. */
+(function(){
+  'use strict';
+  function addOomsinCredit(){
+    const dialog=document.querySelector('#pkGuideDialog');
+    if(!dialog || dialog.querySelector('.pk-guide-oomsin')) return;
+    const credit=document.createElement('div');
+    credit.className='pk-guide-oomsin';
+    credit.setAttribute('aria-label','Easter egg: OOMSIN');
+    credit.innerHTML='<span class="pk-guide-oomsin-star" aria-hidden="true">✦</span><span>Made brighter with a little help from <strong>OOMSIN</strong></span><span class="pk-guide-oomsin-pumpkin" aria-hidden="true">🎃</span>';
+    dialog.appendChild(credit);
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',addOomsinCredit,{once:true});
+  else addOomsinCredit();
+})();
