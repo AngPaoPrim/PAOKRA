@@ -1,4 +1,4 @@
-/* PAOKRA Studio v1.4.9 — isolated user guide */
+/* PAOKRA Studio v1.5.0 — isolated user guide */
 (function(){
 "use strict";
 const SUPPRESS_KEY="paokra.guide.suppress.v1";
