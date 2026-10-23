@@ -9,8 +9,11 @@ const T=(th,en)=>L()==="en"?en:th;
 const root=document.documentElement;
 
 /* ───────── defaults + migration ───────── */
-Object.assign(UI_DEFAULT,{theme:"dark",accent:"violet",radius:14,uiv:2,bg:"aurora",glass:true,card:"elevated",font:"system",boot:"full",accentCustom:"#7c6cff"});
+const previousUIVersion=Number(UI_CFG.uiv)||0;
+Object.assign(UI_DEFAULT,{theme:"dark",accent:"orange",radius:14,uiv:3,bg:"halloween",glass:true,card:"elevated",font:"system",boot:"full",accentCustom:"#ff8a3d"});
 UI_CFG=Object.assign({},UI_DEFAULT,UI_CFG);
+/* v1.5.1: move existing installations from the old static background to Halloween once. */
+if(previousUIVersion<3){Object.assign(UI_CFG,{theme:"dark",accent:"orange",bg:"halloween",card:"elevated",glass:true,uiv:3});try{localStorage.setItem("paokra.ui",JSON.stringify(UI_CFG))}catch(_){}}
 
 /* ───────── range slider progress fill ───────── */
 function fill(el){

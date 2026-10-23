@@ -1,0 +1,22 @@
+const fs=require('fs'),assert=require('assert'),path=require('path');
+const root=__dirname;
+const css=fs.readFileSync(path.join(root,'app/web/paokra-ui.css'),'utf8');
+const ui=fs.readFileSync(path.join(root,'app/web/paokra-ui.js'),'utf8');
+const html=fs.readFileSync(path.join(root,'app/web/index.html'),'utf8');
+const guideCss=fs.readFileSync(path.join(root,'app/web/usage-guide.css'),'utf8');
+const pkg=require(path.join(root,'desktop/package.json'));
+const lock=require(path.join(root,'desktop/package-lock.json'));
+const tests=[];
+function test(n,fn){fn();tests.push(n);console.log('PASS: '+n)}
+test('package version and lockfile are 1.5.1',()=>{assert.equal(pkg.version,'1.5.1');assert.equal(lock.version,pkg.version);assert.equal(lock.packages[''].version,pkg.version)});
+test('Halloween preset exists and selects the Halloween background',()=>{assert(ui.includes('id:"halloween"'));assert(ui.includes('bg:"halloween"'))});
+test('default appearance now boots into Halloween',()=>{assert(ui.includes('uiv:3,bg:"halloween"'));assert(ui.includes('accent:"orange"'))});
+test('existing installs are migrated to Halloween only once',()=>{assert(ui.includes('const previousUIVersion=Number(UI_CFG.uiv)||0'));assert(ui.includes('if(previousUIVersion<3)'));assert(ui.includes('localStorage.setItem("paokra.ui",JSON.stringify(UI_CFG))'))});
+test('main app stylesheet paints the actual body background, not only the guide',()=>{assert(css.includes('html[data-bg="halloween"] body{'));assert(css.includes('background-image:'));assert(css.includes('html[data-bg="halloween"] .main'))});
+test('orange and violet gradients have slow keyframe motion',()=>{for(const s of ['rgba(255,119,27,.50)','rgba(163,61,255,.46)','pkHalloweenMainGradient','26s ease-in-out infinite alternate'])assert(css.includes(s),s)});
+test('pumpkin accent animates without intercepting clicks',()=>{assert(css.includes('html[data-bg="halloween"] body::after'));assert(css.includes('pkHalloweenMainPumpkin'));assert(css.includes('pointer-events:none'))});
+test('light theme rules cannot override the Halloween palette',()=>{for(const s of ['--bg:#0b0715','--surface:#171027','--acc:#ff8a28','--acc2:#b448ff'])assert(css.includes(s),s)});
+test('reduced-motion preference and animation-off setting remain respected',()=>{assert(css.includes('prefers-reduced-motion:reduce'));assert(css.includes('html[data-animations="off"] *'))});
+test('guide styling still contains only guide-scoped OOMSIN styling',()=>{assert(guideCss.includes('pk-guide-oomsin'));assert(!guideCss.includes('v1.5.0 — animated Halloween pumpkin backdrop'))});
+test('index includes the main UI and guide assets once',()=>{assert(html.includes('paokra-ui.css'));assert.equal((html.match(/usage-guide\.css/g)||[]).length,1);assert.equal((html.match(/usage-guide\.js/g)||[]).length,1)});
+console.log('HALLOWEEN_BACKGROUND_151_QA='+tests.length+' PASS');

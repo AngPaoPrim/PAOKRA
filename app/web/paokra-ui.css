@@ -419,3 +419,100 @@ html[data-performance="live"] .card{
 @media(max-width:1024px){
   .side a.pk-nav-collapsed:not(.pk-nav-hidden){display:flex!important}
 }
+
+
+/* v1.5.1 hotfix — the Halloween theme belongs in the main app stylesheet,
+   not only the user-guide overlay stylesheet. */
+html[data-bg="halloween"]{
+  --bg:#0b0715;
+  --bg2:#160b25;
+  --surface:#171027;
+  --surface2:#211533;
+  --surface3:#2b1b40;
+  --line:#432653;
+  --line2:#633879;
+  --acc:#ff8a28;
+  --acc2:#b448ff;
+  --acc-rgb:255 116 35;
+}
+html[data-bg="halloween"] body{background-color:var(--bg)!important}
+html[data-bg="halloween"] #app{
+  position:relative;
+  isolation:isolate;
+  background:transparent!important;
+}
+html[data-bg="halloween"] #app::before{
+  content:"";
+  position:fixed;
+  inset:0;
+  z-index:-1;
+  pointer-events:none;
+  background-image:
+    radial-gradient(48% 48% at 12% 24%,rgba(255,119,27,.50),transparent 70%),
+    radial-gradient(50% 48% at 88% 18%,rgba(163,61,255,.46),transparent 70%),
+    radial-gradient(54% 56% at 72% 92%,rgba(255,62,28,.34),transparent 72%),
+    radial-gradient(48% 52% at 20% 88%,rgba(116,43,213,.34),transparent 70%),
+    linear-gradient(132deg,#0b0715 0%,#1a0a28 28%,#10091f 54%,#210c2b 78%,#090713 100%);
+  background-size:160% 160%,180% 180%,170% 170%,160% 160%,180% 180%;
+  background-position:0% 35%,100% 18%,82% 100%,8% 88%,0% 50%;
+  background-repeat:no-repeat;
+  will-change:background-position,filter;
+}
+html[data-bg="halloween"] .main{
+  background:transparent!important;
+}
+html[data-bg="halloween"] .side{
+  background:rgba(17,9,29,.82)!important;
+  border-right-color:rgba(190,98,255,.24)!important;
+  box-shadow:8px 0 34px rgba(5,2,12,.24),inset -1px 0 rgba(255,135,41,.08);
+  -webkit-backdrop-filter:blur(14px) saturate(1.2);
+  backdrop-filter:blur(14px) saturate(1.2);
+}
+html[data-bg="halloween"] .top{
+  background:rgba(15,8,26,.82)!important;
+  border-bottom-color:rgba(196,105,255,.22)!important;
+  -webkit-backdrop-filter:blur(16px) saturate(1.2);
+  backdrop-filter:blur(16px) saturate(1.2);
+}
+html[data-bg="halloween"] .card{
+  background:linear-gradient(135deg,rgba(27,15,42,.86),rgba(15,13,31,.82))!important;
+  border-color:rgba(183,105,244,.22)!important;
+  box-shadow:0 10px 32px rgba(3,2,12,.18),inset 0 1px rgba(255,255,255,.025);
+}
+html[data-bg="halloween"] .side a.on{
+  background:linear-gradient(100deg,rgba(255,128,35,.25),rgba(169,65,255,.18))!important;
+  box-shadow:inset 0 0 0 1px rgba(255,146,60,.16),0 5px 20px rgba(175,70,255,.07);
+}
+html[data-bg="halloween"] .pk-preset.on{
+  border-color:#ff9238;
+  box-shadow:0 0 0 2px rgba(255,142,45,.20),0 0 24px rgba(160,64,255,.12);
+}
+html[data-bg="halloween"] body::after{
+  content:"🎃  ✦";
+  position:fixed;
+  right:22px;
+  bottom:14px;
+  z-index:2;
+  pointer-events:none;
+  font-size:clamp(25px,3vw,44px);
+  letter-spacing:5px;
+  opacity:.30;
+  filter:drop-shadow(0 0 13px rgba(255,111,32,.75));
+  transform-origin:50% 85%;
+}
+@keyframes pkHalloweenMainGradient{
+  0%{background-position:0% 35%,100% 18%,82% 100%,8% 88%,0% 50%;filter:hue-rotate(-5deg) saturate(1.08)}
+  50%{background-position:72% 68%,18% 92%,12% 18%,100% 22%,100% 45%;filter:hue-rotate(7deg) saturate(1.22)}
+  100%{background-position:100% 12%,0% 26%,76% 76%,35% 100%,35% 100%;filter:hue-rotate(0deg) saturate(1.12)}
+}
+@keyframes pkHalloweenMainPumpkin{
+  0%,100%{transform:translate3d(0,0,0) rotate(-4deg)}
+  50%{transform:translate3d(-5px,-8px,0) rotate(4deg)}
+}
+@media(prefers-reduced-motion:no-preference){
+  html[data-bg="halloween"] #app::before{animation:pkHalloweenMainGradient 26s ease-in-out infinite alternate}
+  html[data-bg="halloween"] body::after{animation:pkHalloweenMainPumpkin 6.5s ease-in-out infinite}
+}
+@media(prefers-reduced-motion:reduce){
+  html[data-bg="halloween"] #app::before,html[data-bg="halloween"] body::after{animation:none!important}
+}
