@@ -1036,10 +1036,98 @@ let systemUpdateWindow=null;
 function openSystemUpdateFix(){try{if(updaterInstance)updaterInstance.autoDownload=false;if(updateInstallRetryTimer){clearTimeout(updateInstallRetryTimer);updateInstallRetryTimer=null;}}catch(_){}if(systemUpdateWindow&&!systemUpdateWindow.isDestroyed()){systemUpdateWindow.show();systemUpdateWindow.focus();return;}systemUpdateWindow=new BrowserWindow({width:760,height:680,minWidth:640,minHeight:560,title:"PAOKRA Studio — System Update FIX",backgroundColor:"#0b1020",autoHideMenuBar:true,webPreferences:{nodeIntegration:true,contextIsolation:false,sandbox:false}});systemUpdateWindow.loadFile(path.join(__dirname,"system-update.html"));systemUpdateWindow.on("closed",()=>{systemUpdateWindow=null;});}
 ipcMain.handle("open-system-update-fix",async()=>{try{openSystemUpdateFix();return{ok:true};}catch(e){return{ok:false,error:String(e.message||e)};}});
 function getGithubJson(url,redirects=0){return new Promise((resolve,reject)=>{const https=require("https");if(redirects>5)return reject(new Error("Too many redirects"));https.get(url,{headers:{"User-Agent":"PAOKRA-System-Update-FIX","Accept":"application/vnd.github+json"}},res=>{if([301,302,303,307,308].includes(res.statusCode)&&res.headers.location){res.resume();return resolve(getGithubJson(res.headers.location,redirects+1));}let b="";res.setEncoding("utf8");res.on("data",c=>{b+=c;if(b.length>4*1024*1024)res.destroy(new Error("Response too large"));});res.on("end",()=>{if(res.statusCode!==200)return reject(new Error("GitHub HTTP "+res.statusCode));try{resolve(JSON.parse(b));}catch(e){reject(e);}});}).on("error",reject);});}
+
+function getGithubText(url, redirects=0, maxBytes=5*1024*1024) {
+  return new Promise((resolve,reject)=>{
+    const https=require("https");
+    if(redirects>8)return reject(new Error("Too many redirects while loading GitHub release metadata"));
+    let parsed;try{parsed=new URL(url);}catch(e){return reject(new Error("Invalid GitHub metadata URL"));}
+    if(parsed.protocol!=="https:"||!["github.com","objects.githubusercontent.com","release-assets.githubusercontent.com"].includes(parsed.hostname))
+      return reject(new Error("GitHub metadata redirected outside approved HTTPS hosts"));
+    https.get(parsed,{headers:{"User-Agent":"PAOKRA-System-Update-FIX","Accept":"application/atom+xml, text/plain, application/octet-stream"}},res=>{
+      if([301,302,303,307,308].includes(res.statusCode)&&res.headers.location){
+        res.resume();let next;try{next=new URL(res.headers.location,parsed).toString();}catch(_){return reject(new Error("Invalid GitHub metadata redirect"));}
+        return resolve(getGithubText(next,redirects+1,maxBytes));
+      }
+      let body="";res.setEncoding("utf8");
+      res.on("data",chunk=>{body+=chunk;if(body.length>maxBytes){res.destroy(new Error("GitHub release metadata is too large"));}});
+      res.on("end",()=>{if(res.statusCode!==200)return reject(new Error("GitHub metadata HTTP "+res.statusCode));resolve(body);});
+      res.on("error",reject);
+    }).on("error",reject);
+  });
+}
+function decodeReleaseEntities(value) {
+  return String(value||"")
+    .replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"')
+    .replace(/&#39;|&apos;/g,"'").replace(/&amp;/g,"&").replace(/&nbsp;/g," ")
+    .replace(/&#(\d+);/g,(_,n)=>String.fromCodePoint(Math.min(0x10ffff,Number(n)||0)))
+    .replace(/&#x([0-9a-f]+);/gi,(_,n)=>String.fromCodePoint(Math.min(0x10ffff,parseInt(n,16)||0)));
+}
+function releaseNotesText(html) {
+  return decodeReleaseEntities(html).replace(/<br\s*\/?>/gi,"\n")
+    .replace(/<\/(?:p|li|h[1-6]|div|ul|ol|pre|blockquote)>/gi,"\n")
+    .replace(/<[^>]*>/g,"").replace(/[ \t]+\n/g,"\n").replace(/\n{3,}/g,"\n\n").trim().slice(0,4000);
+}
+function mapGithubReleaseApi(rows) {
+  return (Array.isArray(rows)?rows:[]).filter(r=>!r.draft&&(r.assets||[]).some(a=>/PAOKRA-Studio-Setup\.exe$/i.test(a.name)))
+    .map(r=>{const a=r.assets.find(a=>/PAOKRA-Studio-Setup\.exe$/i.test(a.name));return{
+      tag:r.tag_name,name:r.name||r.tag_name,publishedAt:r.published_at,
+      prerelease:!!r.prerelease,notes:String(r.body||"").slice(0,4000),
+      asset:a.browser_download_url,size:a.size,digest:String(a.digest||"")
+    };});
+}
+async function fallbackGithubReleaseList(apiError) {
+  const feed=await getGithubText("https://github.com/AngPaoPrim/PAOKRA/releases.atom");
+  const entries=[...feed.matchAll(/<entry>([\s\S]*?)<\/entry>/g)].slice(0,20);
+  const releases=await Promise.all(entries.map(async match=>{
+    const entry=match[1];
+    const link=entry.match(/<link\b[^>]*href="https:\/\/github\.com\/AngPaoPrim\/PAOKRA\/releases\/tag\/([^"]+)"/i);
+    const title=entry.match(/<title>([\s\S]*?)<\/title>/i);
+    const content=entry.match(/<content\b[^>]*>([\s\S]*?)<\/content>/i);
+    if(!link)return null;
+    let tag="";try{tag=decodeURIComponent(link[1]);}catch(_){return null;}
+    if(!/^[A-Za-z0-9._-]{1,160}$/.test(tag))return null;
+    try{
+      // latest.yml is published beside the installer and contains its size and
+      // SHA-512 digest, so the fallback never installs an unverified binary.
+      const yaml=await getGithubText("https://github.com/AngPaoPrim/PAOKRA/releases/download/"+encodeURIComponent(tag)+"/latest.yml");
+      const assetMatch=yaml.match(/^path:\s*([^\r\n]+)\s*$/m);
+      const shaMatch=yaml.match(/^sha512:\s*([A-Za-z0-9+/=]+)\s*$/m);
+      const sizeMatch=yaml.match(/^[ \t]+size:\s*(\d+)\s*$/m);
+      const versionMatch=yaml.match(/^version:\s*([^\r\n]+)\s*$/m);
+      if(!assetMatch||!shaMatch||!sizeMatch)return null;
+      const filename=assetMatch[1].trim();
+      if(filename!=="PAOKRA-Studio-Setup.exe")return null;
+      return {
+        tag,name:decodeReleaseEntities(title?title[1]:tag),publishedAt:(yaml.match(/^releaseDate:\s*['"]?([^'"\r\n]+)['"]?\s*$/m)||[])[1]||"",
+        prerelease:/(?:beta|alpha|rc|pre-release|system-update-fix|fix-bug-beta)/i.test(tag),
+        notes:releaseNotesText(content?content[1]:""),
+        asset:"https://github.com/AngPaoPrim/PAOKRA/releases/download/"+encodeURIComponent(tag)+"/"+filename,
+        size:Number(sizeMatch[1]),digest:"sha512:"+shaMatch[1],metadataVersion:(versionMatch||[])[1]||""
+      };
+    }catch(_){return null;}
+  }));
+  const usable=releases.filter(Boolean);
+  if(!usable.length)throw new Error("GitHub Releases API failed ("+String(apiError||"unknown error")+"); Atom fallback found no release with a verifiable Setup/latest.yml asset");
+  usable.sort((a,b)=>String(b.publishedAt||"").localeCompare(String(a.publishedAt||"")));
+  return usable;
+}
+
 let systemUpdateBusy=false;
 function sendSystemUpdateState(x){try{if(systemUpdateWindow&&!systemUpdateWindow.isDestroyed())systemUpdateWindow.webContents.send("system-update-state",x);}catch(_){}}
-ipcMain.handle("system-update-list",async()=>{try{const rs=await getGithubJson("https://api.github.com/repos/AngPaoPrim/PAOKRA/releases?per_page=100");return{ok:true,currentVersion:app.getVersion(),releases:rs.filter(r=>!r.draft&&(r.assets||[]).some(a=>/PAOKRA-Studio-Setup\.exe$/i.test(a.name))).map(r=>{const a=r.assets.find(a=>/PAOKRA-Studio-Setup\.exe$/i.test(a.name));return{tag:r.tag_name,name:r.name||r.tag_name,publishedAt:r.published_at,prerelease:!!r.prerelease,notes:String(r.body||"").slice(0,4000),asset:a.browser_download_url,size:a.size,digest:String(a.digest||"")};})};}catch(e){return{ok:false,error:String(e.message||e)};}});
-ipcMain.handle("system-update-download",async(_e,url,tag,expectedSize,expectedDigest)=>{if(systemUpdateBusy)return{ok:false,error:"กำลังดาวน์โหลดอยู่"};let u;try{u=new URL(String(url));}catch(_){return{ok:false,error:"ลิงก์ไม่ถูกต้อง"};}if(u.protocol!=="https:"||!["github.com","release-assets.githubusercontent.com","objects.githubusercontent.com"].includes(u.hostname))return{ok:false,error:"อนุญาตเฉพาะ GitHub Releases ผ่าน HTTPS"};systemUpdateBusy=true;const fs=require("fs"),https=require("https"),dir=path.join(app.getPath("downloads"),"PAOKRA-System-Update-FIX");fs.mkdirSync(dir,{recursive:true});const safe=String(tag||"release").replace(/[^\\w.-]/g,"_"),dest=path.join(dir,"PAOKRA-Studio-"+safe+"-Setup.exe");const crypto=require("crypto"),allowedHosts=["github.com","release-assets.githubusercontent.com","objects.githubusercontent.com"],expectedBytes=Math.max(0,Number(expectedSize)||0),expectedSha=String(expectedDigest||"").trim(),partial=dest+".download.partial";const get=(rawUrl,n=0)=>new Promise((resolve,reject)=>{if(n>8)return reject(Error("Redirect limit"));let current;try{current=new URL(rawUrl);}catch(_){return reject(Error("Invalid download redirect URL"));}if(current.protocol!=="https:"||!allowedHosts.includes(current.hostname))return reject(Error("Download redirected outside the approved GitHub HTTPS hosts"));const req=https.get(current,{"headers":{"User-Agent":"PAOKRA-System-Update-FIX","Accept":"application/octet-stream"}},res=>{if([301,302,303,307,308].includes(res.statusCode)&&res.headers.location){res.resume();let next;try{next=new URL(res.headers.location,current).toString();}catch(_){return reject(Error("Invalid download redirect"));}return resolve(get(next,n+1));}if(res.statusCode!==200){res.resume();return reject(Error("Download HTTP "+res.statusCode));}let got=0;const total=Number(res.headers["content-length"])||expectedBytes,out=fs.createWriteStream(partial),hash=crypto.createHash("sha256");res.on("data",b=>{got+=b.length;hash.update(b);sendSystemUpdateState({phase:"download",received:got,total,percent:total?Math.min(100,Math.round(got*100/total)):null});});res.on("aborted",()=>reject(Error("Download connection aborted before completion")));res.on("error",reject);out.on("error",reject);out.on("finish",()=>out.close(()=>{const digest=hash.digest("hex");if(expectedBytes>0&&got!==expectedBytes)return reject(Error("Downloaded size mismatch: expected "+expectedBytes+" bytes, got "+got));if(/^sha256:/i.test(expectedSha)&&digest.toLowerCase()!==expectedSha.slice(7).toLowerCase())return reject(Error("SHA-256 verification failed; refusing to install this file"));try{if(fs.existsSync(dest))fs.unlinkSync(dest);fs.renameSync(partial,dest);}catch(e){return reject(Error("Verified download could not be finalized: "+(e.message||e)));}resolve({bytes:got,sha256:digest});}));res.pipe(out);});req.on("error",reject);});try{const verified=await get(u.toString());sendSystemUpdateState({phase:"downloaded",received:verified.bytes,total:verified.bytes,percent:100,sha256:verified.sha256});return{ok:true,file:dest,size:verified.bytes,sha256:verified.sha256};}catch(e){try{if(fs.existsSync(partial))fs.unlinkSync(partial);}catch(_){}return{ok:false,error:String(e.message||e)};}finally{systemUpdateBusy=false;}});
+ipcMain.handle("system-update-list",async()=>{
+  try{
+    let releases=[],source="api",apiError="";
+    try{
+      const rows=await getGithubJson("https://api.github.com/repos/AngPaoPrim/PAOKRA/releases?per_page=100");
+      releases=mapGithubReleaseApi(rows);
+      if(!releases.length)throw new Error("GitHub API returned no releases with PAOKRA-Studio-Setup.exe");
+    }catch(e){apiError=String(e&&e.message||e);source="atom-fallback";releases=await fallbackGithubReleaseList(apiError);}
+    return{ok:true,currentVersion:app.getVersion(),source,warning:source==="api"?"":"GitHub API unavailable; using release.atom and SHA-512 verified latest.yml metadata",releases};
+  }catch(e){return{ok:false,error:String(e.message||e)};}
+});
+
+ipcMain.handle("system-update-download",async(_e,url,tag,expectedSize,expectedDigest)=>{if(systemUpdateBusy)return{ok:false,error:"กำลังดาวน์โหลดอยู่"};let u;try{u=new URL(String(url));}catch(_){return{ok:false,error:"ลิงก์ไม่ถูกต้อง"};}if(u.protocol!=="https:"||!["github.com","release-assets.githubusercontent.com","objects.githubusercontent.com"].includes(u.hostname))return{ok:false,error:"อนุญาตเฉพาะ GitHub Releases ผ่าน HTTPS"};systemUpdateBusy=true;const fs=require("fs"),https=require("https"),dir=path.join(app.getPath("downloads"),"PAOKRA-System-Update-FIX");fs.mkdirSync(dir,{recursive:true});const safe=String(tag||"release").replace(/[^\\w.-]/g,"_"),dest=path.join(dir,"PAOKRA-Studio-"+safe+"-Setup.exe");const crypto=require("crypto"),allowedHosts=["github.com","release-assets.githubusercontent.com","objects.githubusercontent.com"],expectedBytes=Math.max(0,Number(expectedSize)||0),expectedSha=String(expectedDigest||"").trim(),partial=dest+".download.partial";const get=(rawUrl,n=0)=>new Promise((resolve,reject)=>{if(n>8)return reject(Error("Redirect limit"));let current;try{current=new URL(rawUrl);}catch(_){return reject(Error("Invalid download redirect URL"));}if(current.protocol!=="https:"||!allowedHosts.includes(current.hostname))return reject(Error("Download redirected outside the approved GitHub HTTPS hosts"));const req=https.get(current,{"headers":{"User-Agent":"PAOKRA-System-Update-FIX","Accept":"application/octet-stream"}},res=>{if([301,302,303,307,308].includes(res.statusCode)&&res.headers.location){res.resume();let next;try{next=new URL(res.headers.location,current).toString();}catch(_){return reject(Error("Invalid download redirect"));}return resolve(get(next,n+1));}if(res.statusCode!==200){res.resume();return reject(Error("Download HTTP "+res.statusCode));}let got=0;const total=Number(res.headers["content-length"])||expectedBytes,out=fs.createWriteStream(partial),hash256=crypto.createHash("sha256"),hash512=crypto.createHash("sha512");res.on("data",b=>{got+=b.length;hash256.update(b);hash512.update(b);sendSystemUpdateState({phase:"download",received:got,total,percent:total?Math.min(100,Math.round(got*100/total)):null});});res.on("aborted",()=>reject(Error("Download connection aborted before completion")));res.on("error",reject);out.on("error",reject);out.on("finish",()=>out.close(()=>{const digest256=hash256.digest("hex"),digest512=hash512.digest("base64");if(expectedBytes>0&&got!==expectedBytes)return reject(Error("Downloaded size mismatch: expected "+expectedBytes+" bytes, got "+got));if(/^sha256:/i.test(expectedSha)&&digest256.toLowerCase()!==expectedSha.slice(7).toLowerCase())return reject(Error("SHA-256 verification failed; refusing to install this file"));if(/^sha512:/i.test(expectedSha)&&digest512!==expectedSha.slice(7).trim())return reject(Error("SHA-512 verification failed; refusing to install this file"));try{if(fs.existsSync(dest))fs.unlinkSync(dest);fs.renameSync(partial,dest);}catch(e){return reject(Error("Verified download could not be finalized: "+(e.message||e)));}resolve({bytes:got,sha256:digest256,sha512:digest512});}));res.pipe(out);});req.on("error",reject);});try{const verified=await get(u.toString());sendSystemUpdateState({phase:"downloaded",received:verified.bytes,total:verified.bytes,percent:100,sha256:verified.sha256});return{ok:true,file:dest,size:verified.bytes,sha256:verified.sha256};}catch(e){try{if(fs.existsSync(partial))fs.unlinkSync(partial);}catch(_){}return{ok:false,error:String(e.message||e)};}finally{systemUpdateBusy=false;}});
 ipcMain.handle("system-update-install",async(_e,file)=>{try{const fs=require("fs");const dir=path.resolve(path.join(app.getPath("downloads"),"PAOKRA-System-Update-FIX"))+path.sep;if(typeof file!=="string"||!path.resolve(file).toLowerCase().startsWith(dir.toLowerCase())||!file.toLowerCase().endsWith(".exe")||!fs.existsSync(file))return{ok:false,error:"ไม่พบไฟล์ Setup ที่ดาวน์โหลดจากเครื่องมือนี้"};const {spawn}=require("child_process");spawn(file,[],{detached:true,stdio:"ignore",windowsHide:false}).unref();sendSystemUpdateState({phase:"install"});setTimeout(()=>app.quit(),900);return{ok:true};}catch(e){return{ok:false,error:String(e.message||e)};}});
 
 ipcMain.on("update-user-activity", () => {

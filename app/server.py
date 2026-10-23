@@ -622,6 +622,237 @@ def _seek_capture_to_seconds(capture, seconds, fps):
         return False
 
 
+
+# Clip Flow can open and decode the next directed bridge while the current clip
+# is still playing. Captures stay off the active output until the exact path and
+# destination resume timestamp are selected by the controller.
+_source_prime_lock = threading.RLock()
+_source_prime_cache = {}
+_source_prime_epoch = 0
+_SOURCE_PRIME_MAX = 4
+_SOURCE_PRIME_TTL_SEC = 45.0
+MEDIA_HANDOFF_LEAD_SEC = 0.035
+
+def _source_prime_key(src, start_seconds=0.0):
+    try:
+        offset = max(0.0, round(float(start_seconds), 4))
+    except (TypeError, ValueError, OverflowError):
+        offset = 0.0
+    try:
+        resolved = Path(str(src)).resolve()
+        path_key = os.path.normcase(str(resolved)).casefold()
+        stat = resolved.stat()
+        file_version = (int(stat.st_size), int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1e9))))
+    except Exception:
+        path_key = os.path.normcase(str(src)).casefold()
+        file_version = (0, 0)
+    return path_key, offset, file_version
+
+def _discard_source_prime(item):
+    try:
+        cap = item.get("cap") if isinstance(item, dict) else None
+        if cap is not None:
+            cap.release()
+    except Exception:
+        pass
+
+def _clear_source_prime_cache():
+    """Invalidate in-flight prime workers and release every unused media handle."""
+    global _source_prime_epoch
+    with _source_prime_lock:
+        _source_prime_epoch += 1
+        stale = list(_source_prime_cache.values())
+        _source_prime_cache.clear()
+    for item in stale:
+        _discard_source_prime(item)
+    return len(stale)
+
+def _take_source_prime(src, start_seconds=0.0):
+    key = _source_prime_key(src, start_seconds)
+    with _source_prime_lock:
+        item = _source_prime_cache.pop(key, None)
+    if not item:
+        return None
+    if time.monotonic() - float(item.get("created_at") or 0.0) > _SOURCE_PRIME_TTL_SEC:
+        _discard_source_prime(item)
+        return None
+    cap = item.get("cap")
+    try:
+        if cap is None or not cap.isOpened():
+            _discard_source_prime(item)
+            return None
+    except Exception:
+        _discard_source_prime(item)
+        return None
+    return item
+
+def _prime_source_capture(src, start_seconds=0.0, expected_epoch=None):
+    with _source_prime_lock:
+        prime_epoch = _source_prime_epoch if expected_epoch is None else expected_epoch
+    try:
+        src = str(src or "")
+        if not src or not Path(src).is_file():
+            return False
+        key = _source_prime_key(src, start_seconds)
+        now = time.monotonic()
+        with _source_prime_lock:
+            current = _source_prime_cache.get(key)
+            if current and now - float(current.get("created_at") or 0.0) <= _SOURCE_PRIME_TTL_SEC:
+                cap = current.get("cap")
+                try:
+                    if cap is not None and cap.isOpened():
+                        return True
+                except Exception:
+                    pass
+                _source_prime_cache.pop(key, None)
+        cap = _open_video_capture(src)
+        if cap is None or not cap.isOpened():
+            try:
+                if cap is not None:
+                    cap.release()
+            except Exception:
+                pass
+            return False
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        if not np.isfinite(fps) or fps < 1.0 or fps > 240.0:
+            fps = 30.0
+        offset = max(0.0, float(start_seconds or 0.0))
+        if offset > 0.001 and not _seek_capture_to_seconds(cap, offset, fps):
+            cap.release()
+            return False
+        ok, first_frame = cap.read()
+        if not ok or first_frame is None:
+            cap.release()
+            return False
+        item = {
+            "path": src, "start_seconds": offset, "cap": cap, "first_frame": first_frame,
+            "fps": fps, "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1),
+            "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1),
+            "frame_count": float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0),
+            "created_at": time.monotonic(),
+        }
+        evicted = []
+        stale_epoch = False
+        with _source_prime_lock:
+            if prime_epoch != _source_prime_epoch:
+                stale_epoch = True
+            else:
+                # Close stale or duplicate captures before adding another preparation.
+                for old_key, old_item in list(_source_prime_cache.items()):
+                    if time.monotonic() - float(old_item.get("created_at") or 0.0) > _SOURCE_PRIME_TTL_SEC:
+                        evicted.append(_source_prime_cache.pop(old_key))
+                duplicate = _source_prime_cache.pop(key, None)
+                if duplicate:
+                    evicted.append(duplicate)
+                while len(_source_prime_cache) >= _SOURCE_PRIME_MAX:
+                    oldest_key = min(_source_prime_cache, key=lambda k: _source_prime_cache[k].get("created_at", 0.0))
+                    evicted.append(_source_prime_cache.pop(oldest_key))
+                _source_prime_cache[key] = item
+        if stale_epoch:
+            _discard_source_prime(item)
+            return False
+        for stale in evicted:
+            _discard_source_prime(stale)
+        return True
+    except Exception:
+        return False
+
+def _prime_flow_directed_pair(from_path, to_path, target_role="normal"):
+    try:
+        if not from_path or not to_path or os.path.normcase(str(from_path)) == os.path.normcase(str(to_path)):
+            return False
+        lookup = {}
+        seam = find_cached_transition(DATA, from_path, to_path,
+                                      runtime_profile=_ai_seam_runtime_profile(), diagnostics=lookup)
+        if not seam:
+            return False
+        asset = str(seam.get("asset") or "")
+        try:
+            resume = max(0.0, float(seam.get("resume_seconds") or 0.0))
+        except (TypeError, ValueError, OverflowError):
+            resume = 0.0
+        to_duration = max(0.0, float(seam.get("to_duration") or 0.0))
+        if not asset or not Path(asset).is_file() or resume <= 0.0 or to_duration <= resume:
+            return False
+        # Open the short bridge and B at its exact resume point concurrently;
+        # both first frames are decoded before the handoff, not at the boundary.
+        with _source_prime_lock:
+            expected_epoch = _source_prime_epoch
+        tasks = [
+            threading.Thread(target=_prime_source_capture, args=(asset, 0.0),
+                             kwargs={"expected_epoch": expected_epoch},
+                             name="paokra-prime-seam", daemon=True),
+            threading.Thread(target=_prime_source_capture, args=(str(to_path), resume),
+                             kwargs={"expected_epoch": expected_epoch},
+                             name="paokra-prime-destination", daemon=True),
+        ]
+        for task in tasks:
+            task.start()
+        deadline = time.monotonic() + 2.1
+        for task in tasks:
+            task.join(timeout=max(0.0, deadline - time.monotonic()))
+        seam_key = _source_prime_key(asset, 0.0)
+        destination_key = _source_prime_key(str(to_path), resume)
+        with _source_prime_lock:
+            return (expected_epoch == _source_prime_epoch
+                    and seam_key in _source_prime_cache
+                    and destination_key in _source_prime_cache)
+    except Exception:
+        return False
+
+def _clip_flow_schedule_handoff_prime(current_path, expected_phase=None):
+    try:
+        with clip_flow_lock:
+            phase = str(expected_phase or clip_flow_runtime.get("phase") or "")
+            if not clip_flow_runtime.get("active") or phase not in ("open", "normal"):
+                return False
+            if os.path.normcase(str(clip_flow_runtime.get("current_clip") or "")) != os.path.normcase(str(current_path)):
+                return False
+            generation = clip_flow_runtime.get("source_generation")
+        with source_buffer_lock:
+            origin = source_playback_origin
+            duration = float(source_loop_duration or 0.0)
+        if origin is None or not np.isfinite(duration) or duration <= 0.0:
+            return False
+
+        def worker():
+            while not stop_event.is_set():
+                with clip_flow_lock:
+                    still_active = (
+                        bool(clip_flow_runtime.get("active"))
+                        and clip_flow_runtime.get("phase") == phase
+                        and os.path.normcase(str(clip_flow_runtime.get("current_clip") or "")) == os.path.normcase(str(current_path))
+                        and clip_flow_runtime.get("source_generation") == generation
+                    )
+                if not still_active:
+                    return
+                with source_buffer_lock:
+                    now_origin = source_playback_origin
+                    now_duration = float(source_loop_duration or 0.0)
+                if now_origin is None or now_duration <= 0.0:
+                    return
+                remaining = now_origin + now_duration - time.monotonic()
+                if remaining <= 2.5:
+                    break
+                time.sleep(min(0.12, max(0.03, remaining - 2.5)))
+            with clip_flow_lock:
+                if (not clip_flow_runtime.get("active")
+                    or clip_flow_runtime.get("phase") != phase
+                    or os.path.normcase(str(clip_flow_runtime.get("current_clip") or "")) != os.path.normcase(str(current_path))
+                    or clip_flow_runtime.get("source_generation") != generation):
+                    return
+                if clip_flow_runtime.get("stop_requested") and clip_flow_runtime.get("pending_stop_path"):
+                    target = str(clip_flow_runtime.get("pending_stop_path") or "")
+                else:
+                    target = _clip_flow_peek_next_locked()
+            if target and Path(target).is_file():
+                _prime_flow_directed_pair(current_path, target)
+        threading.Thread(target=worker, name="paokra-clip-flow-prime", daemon=True).start()
+        return True
+    except Exception:
+        return False
+
+
 def _release_capture_after_thread(thread, capture):
     """Release a VideoCapture after the decoder stops using it.
 
@@ -656,7 +887,9 @@ def _set_source_locked(src, start_seconds=0.0, known_timing=None):
     global source_render_cache, source_render_cache_key
     # Open the candidate first. A bad/corrupt/unsupported source must not destroy
     # the currently selected working source.
-    new_cap = _open_video_capture(src)
+    primed_source = _take_source_prime(src, start_seconds)
+    new_cap = primed_source.get("cap") if primed_source else _open_video_capture(src)
+    first_decoded_frame = primed_source.get("first_frame") if primed_source else None
     ok = bool(new_cap is not None and new_cap.isOpened())
     if not ok:
         try:
@@ -723,7 +956,7 @@ def _set_source_locked(src, start_seconds=0.0, known_timing=None):
     # Validate that the candidate decoder can seek BEFORE stopping/replacing the
     # existing working source. Failed seeking must not desynchronize video from
     # the audio seek or leave the user with a silently frozen/wrong-position clip.
-    seek_positioned = _seek_capture_to_seconds(new_cap, start_seconds, new_source_fps)
+    seek_positioned = bool(primed_source) or _seek_capture_to_seconds(new_cap, start_seconds, new_source_fps)
     if not seek_positioned:
         try:
             new_cap.release()
@@ -731,6 +964,11 @@ def _set_source_locked(src, start_seconds=0.0, known_timing=None):
             pass
         return False
 
+    with clip_flow_lock:
+        flow_source_for_prime = (
+            bool(clip_flow_runtime.get("active"))
+            and os.path.normcase(str(clip_flow_runtime.get("current_clip") or "")) == os.path.normcase(str(src))
+        )
     # Replacing media preserves the Source transform. This matches the useful
     # OBS behavior: changing a file does not unexpectedly move/resize the box.
     with lock:
@@ -763,8 +1001,11 @@ def _set_source_locked(src, start_seconds=0.0, known_timing=None):
             source_buffer.clear()
             source_start_offset = start_seconds
             is_running = bool(state.get("running", False))
+            # Prepared Clip Flow handoffs do not need the generic 300-ms cold-start
+            # cushion. That cushion otherwise visibly holds the previous clip.
+            start_lead = MEDIA_HANDOFF_LEAD_SEC if (flow_source_for_prime and primed_source) else MEDIA_START_LEAD_SEC
             source_playback_origin = (
-                time.monotonic() + MEDIA_START_LEAD_SEC - start_seconds
+                time.monotonic() + start_lead - start_seconds
                 if is_running else None
             )
             source_sequence_index = int(round(start_seconds * new_source_fps)) if is_running else 0
@@ -809,6 +1050,12 @@ def _set_source_locked(src, start_seconds=0.0, known_timing=None):
         if (clip_flow_runtime.get("active") and
                 os.path.normcase(str(clip_flow_runtime.get("current_clip") or "")) == os.path.normcase(str(src))):
             clip_flow_runtime["source_generation"] = generation
+            if clip_flow_runtime.get("phase") == "seam":
+                record = clip_flow_runtime.get("last_seam_transition")
+                if isinstance(record, dict) and os.path.normcase(str(record.get("asset") or "")) == os.path.normcase(str(src)):
+                    record["preload_hit"] = bool(primed_source)
+                    record["preload_first_frame_ready"] = bool(first_decoded_frame is not None)
+                    record["preload_created_at"] = float(primed_source.get("created_at") or 0.0) if primed_source else None
     if old is not None and old is not new_cap:
         if old_thread is not None and old_thread.is_alive():
             threading.Thread(
@@ -829,7 +1076,8 @@ def _set_source_locked(src, start_seconds=0.0, known_timing=None):
         source_decode_stop = worker_stop
         source_decode_thread = threading.Thread(
             target=source_decode_worker,
-            args=(new_cap, str(src), generation, worker_stop, bool(seek_positioned and start_seconds > 0.001)), 
+            args=(new_cap, str(src), generation, worker_stop,
+                  bool(primed_source or (seek_positioned and start_seconds > 0.001)), first_decoded_frame),
             name="paokra-source-decode",
             daemon=True,
         )
@@ -1653,7 +1901,7 @@ def _update_loop_duration(frames):
     except Exception:
         pass
 
-def source_decode_worker(local_cap, src, generation, worker_stop=None, initial_positioned=False):
+def source_decode_worker(local_cap, src, generation, worker_stop=None, initial_positioned=False, initial_decoded=None):
     global source_frame, source_frame_serial, source_prepared_frame, source_prepared_serial, source_variant
     global source_playback_origin, source_sequence_index, source_start_offset, clip_flow_eof_generation
     # Backwards-compatible fallback for internal/manual callers; normal source
@@ -1768,7 +2016,14 @@ def source_decode_worker(local_cap, src, generation, worker_stop=None, initial_p
                         source_sequence_index += _skipped
                     pass_frames += _skipped
 
-        ok, decoded = local_cap.read()
+        if initial_decoded is not None:
+            # The primer decoded the first frame while the preceding clip was
+            # still on air; publish it immediately instead of stalling at read().
+            decoded = initial_decoded
+            initial_decoded = None
+            ok = True
+        else:
+            ok, decoded = local_cap.read()
         if worker_stop.is_set():
             break
         if not ok:
@@ -2821,20 +3076,28 @@ def _clip_flow_finish_impl(error="", phase="finished"):
         source_playback_origin = None
         source_sequence_index = 0
     clip_flow_done_event.set()
+    _clear_source_prime_cache()
 
 
-def _clip_flow_shuffle_next_locked():
+def _clip_flow_ensure_normal_queue_locked():
     normals = [str(x) for x in (clip_flow_config.get("normal") or []) if str(x) and Path(str(x)).is_file()]
-    if not normals:
-        return ""
     queue = list(clip_flow_runtime.get("normal_queue") or [])
-    if not queue:
+    if not queue and normals:
         random.shuffle(normals)
         previous = str(clip_flow_runtime.get("previous_normal") or "")
         if len(normals) > 1 and normals[0] == previous:
             normals[0], normals[1] = normals[1], normals[0]
         queue = normals
+        clip_flow_runtime["normal_queue"] = queue
         clip_flow_runtime["played_in_cycle"] = []
+    return queue
+
+def _clip_flow_peek_next_locked():
+    queue = _clip_flow_ensure_normal_queue_locked()
+    return str(queue[0]) if queue else ""
+
+def _clip_flow_shuffle_next_locked():
+    queue = _clip_flow_ensure_normal_queue_locked()
     if not queue:
         return ""
     chosen = queue.pop(0)
@@ -3049,6 +3312,28 @@ def _clip_flow_controller():
                                 reason="stop_after_current_clip", changed_at=time.time()
                             )
                 elif phase == "seam":
+                    # Persist evidence of the seam's actual decode/output interval before
+                    # the runtime record moves on to destination B.
+                    record = clip_flow_runtime.get("last_seam_transition")
+                    if isinstance(record, dict) and record.get("playback_started_at"):
+                        with source_frame_lock:
+                            decoded_now = int(source_prepared_serial)
+                        with render_metrics_lock:
+                            vcam_now = int(vcam_frame_count)
+                            render_now = int(render_frame_count)
+                        record["playback_finished_at"] = time.time()
+                        prepared_before = record.get("source_prepared_serial_before")
+                        vcam_before = record.get("vcam_frame_count_before")
+                        render_before = record.get("render_frame_count_before")
+                        record["prepared_frames_observed"] = max(
+                            0, decoded_now - int(decoded_now if prepared_before is None else prepared_before)
+                        )
+                        record["vcam_frames_during_seam"] = max(
+                            0, vcam_now - int(vcam_now if vcam_before is None else vcam_before)
+                        )
+                        record["render_frames_during_seam"] = max(
+                            0, render_now - int(render_now if render_before is None else render_before)
+                        )
                     # Resume B at the timestamp used to prepare the bridge endpoint.
                     next_path = str(clip_flow_runtime.get("seam_next_path") or "").strip()
                     try:
@@ -3148,10 +3433,25 @@ def _clip_flow_controller():
                 _clip_flow_finish(phase="finished")
                 continue
             try:
+                seam_prepared_before = None
+                if target_phase == "seam":
+                    with source_frame_lock:
+                        seam_prepared_before = int(source_prepared_serial)
+                with render_metrics_lock:
+                    seam_vcam_before = int(vcam_frame_count)
+                    seam_render_before = int(render_frame_count)
                 if not Path(next_path).is_file() or not set_source(next_path, start_seconds=(seam_resume_seconds if preserve_seam_audio else 0.0)):
                     role = "Stop" if target_phase == "stop" else "AI Seam" if target_phase == "seam" else "Normal"
                     raise RuntimeError(f"{role} source could not be opened: {next_path}")
                 if target_phase == "seam":
+                    with clip_flow_lock:
+                        record = clip_flow_runtime.get("last_seam_transition")
+                        if isinstance(record, dict) and os.path.normcase(str(record.get("asset") or "")) == os.path.normcase(str(next_path)):
+                            record["playback_started_at"] = time.time()
+                            record["source_generation"] = source_decode_generation
+                            record["source_prepared_serial_before"] = int(seam_prepared_before or 0)
+                            record["vcam_frame_count_before"] = int(seam_vcam_before)
+                            record["render_frame_count_before"] = int(seam_render_before)
                     # Audio uses destination B underneath the generated video-only
                     # bridge, and keeps playing through the resumed B source.
                     with clip_flow_lock:
@@ -3164,6 +3464,8 @@ def _clip_flow_controller():
                         _clip_start_audio(next_path, source_offset_seconds=seam_resume_seconds)
                 else:
                     _clip_start_audio(next_path)
+                if target_phase == "normal":
+                    _clip_flow_schedule_handoff_prime(next_path, "normal")
             except Exception as exc:
                 _clip_flow_finish(error=f"{type(exc).__name__}: {str(exc)[:300]}", phase="error")
 
@@ -3328,9 +3630,14 @@ def _clip_flow_begin_open_impl(reason="manual"):
             order.append("source")
         state["layer_order"] = order
     try:
+        # Release any leftover media handles from an earlier Flow run before
+        # warming OPEN; stale asynchronous prime workers are invalidated by epoch.
+        _clear_source_prime_cache()
+        _prime_source_capture(open_path, 0.0)
         if not set_source(open_path):
             raise RuntimeError(f"เปิดคลิป Open ไม่สำเร็จ: {open_path}")
         _clip_start_audio(open_path)
+        _clip_flow_schedule_handoff_prime(open_path, "open")
         return {
             "ok": True, "running": True, "phase": "open", "source": open_path,
             "audio_active": bool(vaudio.active), "virtualcam": bool(vcam.active),

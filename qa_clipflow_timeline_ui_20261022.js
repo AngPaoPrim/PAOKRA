@@ -57,14 +57,54 @@ check("Engine start retains the last valid frame while decoder pre-roll fills", 
   assert.ok(!body.includes("source_prepared_frame = None; source_prepared_serial += 1"));
 });
 check("Normal queue remains randomized per cycle, not source-list order", () => {
+  const ensureA = server.indexOf("def _clip_flow_ensure_normal_queue_locked():");
+  const ensureB = server.indexOf("def _clip_flow_peek_next_locked()", ensureA);
   const a = server.indexOf("def _clip_flow_shuffle_next_locked():");
   const b = server.indexOf("def _ensure_clip_flow_controller()", a);
+  assert.ok(ensureA >= 0 && ensureB > ensureA, "shared randomized queue helper was not found");
   assert.ok(a >= 0 && b > a, "shuffle function was not found");
+  const ensureBody = server.slice(ensureA, ensureB);
   const body = server.slice(a, b);
-  assert.match(body, /random\.shuffle\(normals\)/);
-  assert.match(body, /if len\(normals\) > 1 and normals\[0\] == previous/);
+  assert.match(ensureBody, /random\.shuffle\(normals\)/);
+  assert.match(ensureBody, /if len\(normals\) > 1 and normals\[0\] == previous/);
   assert.match(body, /chosen = queue\.pop\(0\)/);
   assert.match(body, /clip_flow_runtime\["normal_queue"\] = queue/);
+  assert.match(server, /def _clip_flow_peek_next_locked\(\):[\s\S]{0,180}return str\(queue\[0\]\) if queue else ""/);
+});
+check("Clip Flow pre-decodes the exact directed seam and destination before EOF", () => {
+  assert.match(server, /def _prime_source_capture\(src, start_seconds=0\.0(?:, expected_epoch=None)?\):/);
+  assert.match(server, /def _prime_flow_directed_pair\(from_path, to_path/);
+  assert.match(server, /_prime_source_capture, args=\(asset, 0\.0\)/);
+  assert.match(server, /_prime_source_capture, args=\(str\(to_path\), resume\)/);
+  assert.match(server, /def _clip_flow_schedule_handoff_prime\(current_path/);
+  assert.match(server, /if remaining <= 2\.5:/);
+  assert.match(server, /def _clear_source_prime_cache\(\):/);
+  assert.match(server, /if prime_epoch != _source_prime_epoch:/);
+  assert.match(server, /_clear_source_prime_cache\(\)\s+_prime_source_capture\(open_path, 0\.0\)/);
+  assert.match(server, /_clip_flow_schedule_handoff_prime\(open_path, "open"\)/);
+  assert.match(server, /_clip_flow_schedule_handoff_prime\(next_path, "normal"\)/);
+  assert.match(server, /MEDIA_HANDOFF_LEAD_SEC = 0\.035/);
+});
+check("Clip Flow exposes actual SEAM playback and virtual-camera frame evidence", () => {
+  assert.match(server, /record\["playback_started_at"\] = time\.time\(\)/);
+  assert.match(server, /record\["prepared_frames_observed"\]/);
+  assert.match(server, /record\["vcam_frames_during_seam"\]/);
+  assert.match(server, /record\["preload_hit"\] = bool\(primed_source\)/);
+  assert.match(source, /SEAM playback started/);
+  assert.match(source, /SEAM cache selected, but playback has NOT been confirmed/);
+  assert.match(source, /preloaded first frame used/);
+  assert.match(source, /PRELOAD MISS \(cold decoder\)/);
+  assert.match(source, /prepared frames/);
+});
+check("Version selector falls back when GitHub Releases API is unavailable", () => {
+  const desktop = require("fs").readFileSync(require("path").join(__dirname,"desktop","main.cjs"),"utf8");
+  const picker = require("fs").readFileSync(require("path").join(__dirname,"desktop","system-update.html"),"utf8");
+  assert.match(desktop, /fallbackGithubReleaseList/);
+  assert.match(desktop, /releases\.atom/);
+  assert.match(desktop, /latest\.yml/);
+  assert.match(desktop, /sha512:/);
+  assert.match(desktop, /SHA-512 verification failed/);
+  assert.match(picker, /x\.source==='atom-fallback'/);
 });
 check("AI Seam uses an exact directed pair and resumes destination B", () => {
   assert.match(server, /find_cached_transition\(\s*DATA,\s*current_path,\s*next_path,\s*runtime_profile=seam_runtime_profile,\s*diagnostics=seam_lookup,\s*\)/);
@@ -269,12 +309,14 @@ check("System Update FIX offers versions, is directly reachable from Settings, a
   assert.ok(preload.includes('openSystemUpdateFix: () => ipcRenderer.invoke("open-system-update-fix")'));
   assert.ok(main.includes('ipcMain.handle("open-system-update-fix"') && main.includes("openSystemUpdateFix();return{ok:true}"));
   assert.ok(updateUi.includes('id="v"') && updateUi.includes("system-update-list"));
-  assert.ok(updateUi.includes("rs.find(x=>x.tag==='v1.4.5-beta.1')||rs.find(x=>x.tag==='v1.4.4-system-update-fix')"), "System Update should default to this beta when available, then fall back to the supplemental v1.4.4 fix");
+  assert.ok(updateUi.includes("rs.find(x=>x.tag==='v1.4.8-seam-smoothness-beta')||rs.find(x=>x.tag==='v1.4.7-seam-workflow-beta')"), "System Update should default to the latest seam-smoothness beta, then fall back to the previous seam workflow beta");
   assert.ok(updateUi.includes('id="db"') && updateUi.includes('id="ib"'));
   assert.ok(updateUi.includes("system-update-download',r.asset,r.tag,r.size,r.digest"));
   assert.ok(main.includes('digest:String(a.digest||"")'));
   assert.ok(main.includes('expectedBytes>0&&got!==expectedBytes'));
-  assert.ok(main.includes('hash.digest("hex")'));
+  assert.ok(main.includes('hash256.digest("hex")'));
+  assert.ok(main.includes('hash512.digest("base64")'));
+  assert.ok(main.includes('expectedSha.slice(7).trim()'));
   assert.ok(main.includes('expectedSha.slice(7).toLowerCase()'));
   assert.ok(main.includes("Download redirected outside the approved GitHub HTTPS hosts"));
   assert.ok(main.includes('fs.renameSync(partial,dest)'));

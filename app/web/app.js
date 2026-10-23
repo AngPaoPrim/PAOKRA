@@ -2500,20 +2500,35 @@ function renderClipFlow(){
     });
   }
   const phase=clipFlowRuntime.phase||"idle";
-  const labels={open:"กำลังเล่น Open",normal:"กำลังเล่น Normal",stop:"กำลังเล่น Stop",finished:"จบ Flow",error:"Flow มีข้อผิดพลาด",idle:"ยังไม่ได้เริ่ม"};
+  const labels={open:"กำลังเล่น Open",normal:"กำลังเล่น Normal",seam:"กำลังเล่น AI Seam (เฟรมคั่น)",stop:"กำลังเล่น Stop",finished:"จบ Flow",error:"Flow มีข้อผิดพลาด",idle:"ยังไม่ได้เริ่ม"};
   const rt=$("#clipFlowRuntime");
   if(rt){
     const current=clipFlowRuntime.current_clip?clipBaseName(clipFlowRuntime.current_clip):"-";
     const lookup=clipFlowRuntime.last_seam_lookup;
     const seamDiag=lookup?
-      ("AI Seam "+(lookup.found?"used":"not used")+" · "+clipBaseName(lookup.from_path)+" → "+clipBaseName(lookup.to_path)+
+      ("AI Seam cache "+(lookup.found?"matched":"not matched")+" · "+clipBaseName(lookup.from_path)+" → "+clipBaseName(lookup.to_path)+
        " · "+String(lookup.reason||"no backend reason")+
        (lookup.bridge_fps||lookup.runtime_fps?(" · FPS "+(lookup.bridge_fps||"?")+"/"+(lookup.runtime_fps||"?")):"")):"";
+    const transition=clipFlowRuntime.last_seam_transition;
+    let seamPlayback="";
+    if(transition){
+      if(transition.playback_started_at){
+        const expected=Math.max(0,Number(transition.frame_count)||0);
+        const decoded=transition.prepared_frames_observed==null?null:Math.max(0,Number(transition.prepared_frames_observed)||0);
+        const camera=transition.vcam_frames_during_seam==null?null:Math.max(0,Number(transition.vcam_frames_during_seam)||0);
+        const preload=transition.preload_hit===true?" · preloaded first frame used":transition.preload_hit===false?" · PRELOAD MISS (cold decoder)":"";
+        seamPlayback="SEAM playback started · "+clipBaseName(transition.from_path)+" → "+clipBaseName(transition.to_path)+preload+
+          (decoded==null?" · measuring frames":(" · prepared frames "+decoded+"/"+expected))+
+          (camera==null?"":(" · Virtual Camera output ticks "+camera));
+      }else{
+        seamPlayback="SEAM cache selected, but playback has NOT been confirmed · "+clipBaseName(transition.from_path)+" → "+clipBaseName(transition.to_path);
+      }
+    }
     rt.textContent=(clipFlowRuntime.active?"RUNNING":"STOPPED")+" · "+(labels[phase]||phase)+" · current: "+current+
       " · Normal queue remaining: "+(Number(clipFlowRuntime.normal_queue_remaining)||0)+
       " · played this cycle: "+(Number(clipFlowRuntime.played_in_cycle)||0)+(clipFlowRuntime.stop_requested?" · Stop queued: current clip will finish first":"")+
-      (seamDiag?" · "+seamDiag:"");
-    rt.title=seamDiag||"ยังไม่มีการตรวจรอยต่อในรอบนี้";
+      (seamDiag?" · "+seamDiag:"")+(seamPlayback?" · "+seamPlayback:"");
+    rt.title=[seamDiag,seamPlayback].filter(Boolean).join("\n")||"ยังไม่มีการตรวจรอยต่อในรอบนี้";
   }
   if(clipFlowRuntime.last_error)clipFlowMessage(clipFlowRuntime.last_error,true);
   const timeline=$("#clipFlowSeek"),time=$("#clipFlowTime"),remaining=$("#clipFlowRemaining"),fpsInfo=$("#clipFlowFps");
